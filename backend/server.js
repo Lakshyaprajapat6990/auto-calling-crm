@@ -17,6 +17,10 @@ const sessions = new Map();
 
 function ensureDb() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(DB_PATH)) {
+    fs.writeFileSync(DB_PATH, fs.readFileSync(SEED_PATH, "utf8"));
+    return;
+  }
   const current = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
   const hasData = Object.values(current).some((value) => Array.isArray(value) && value.length > 0);
   if (!hasData) {
