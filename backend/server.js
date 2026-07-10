@@ -404,13 +404,14 @@ function serveStatic(req, res, pathname) {
 
 const server = http.createServer(async (req, res) => {
   try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url.pathname);
     } else {
       serveStatic(req, res, url.pathname);
     }
   } catch (error) {
+    console.error(error);
     sendJson(res, 500, { error: error.message });
   }
 });
