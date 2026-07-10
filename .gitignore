@@ -1,0 +1,7 @@
+node_modules/
+data/*.tmp
+data/db.json
+*.log
+.env
+tmp/
+New Text Document.txt

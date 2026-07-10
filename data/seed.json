@@ -1,0 +1,92 @@
+{
+  "users": [
+    {
+      "id": "usr_admin",
+      "name": "Admin User",
+      "email": "admin@autocalling.local",
+      "password": "admin123",
+      "role": "admin"
+    }
+  ],
+  "employees": [
+    {
+      "id": "emp_001",
+      "name": "Rahul Sharma",
+      "phone": "+919800000001",
+      "email": "rahul@example.com",
+      "department": "Sales",
+      "language": "Hindi",
+      "availability": "free",
+      "online": true
+    },
+    {
+      "id": "emp_002",
+      "name": "Priya Singh",
+      "phone": "+919800000002",
+      "email": "priya@example.com",
+      "department": "Support",
+      "language": "English",
+      "availability": "busy",
+      "online": true
+    },
+    {
+      "id": "emp_003",
+      "name": "Amit Verma",
+      "phone": "+919800000003",
+      "email": "amit@example.com",
+      "department": "Sales",
+      "language": "Hindi",
+      "availability": "free",
+      "online": true
+    }
+  ],
+  "customers": [
+    {
+      "id": "cus_001",
+      "name": "Ramesh Kumar",
+      "phone": "+919700000001",
+      "city": "Delhi",
+      "language": "Hindi",
+      "product": "Loan Renewal",
+      "status": "new",
+      "notes": "Interested in renewal options.",
+      "optOut": false
+    },
+    {
+      "id": "cus_002",
+      "name": "Neha Patel",
+      "phone": "+919700000002",
+      "city": "Ahmedabad",
+      "language": "Hindi",
+      "product": "Service Plan",
+      "status": "new",
+      "notes": "Asked for callback after office hours.",
+      "optOut": false
+    },
+    {
+      "id": "cus_003",
+      "name": "Arjun Mehta",
+      "phone": "+919700000003",
+      "city": "Mumbai",
+      "language": "English",
+      "product": "Appointment",
+      "status": "new",
+      "notes": "Prefers English communication.",
+      "optOut": false
+    }
+  ],
+  "campaigns": [
+    {
+      "id": "cmp_001",
+      "name": "July Renewal Follow-up",
+      "status": "active",
+      "department": "Sales",
+      "messageTemplate": "Hello {{name}}, this is Auto Calling CRM calling about your {{product}}. Press 1 to talk to our executive, press 2 for callback, or press 9 to opt out.",
+      "customerIds": ["cus_001", "cus_002", "cus_003"],
+      "retryLimit": 2
+    }
+  ],
+  "calls": [],
+  "callbacks": [],
+  "recordings": []
+}
