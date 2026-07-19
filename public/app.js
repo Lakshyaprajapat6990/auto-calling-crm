@@ -88,6 +88,8 @@ function renderLogin(message = "") {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
+      localStorage.removeItem("token");
+      state.token = "";
       const result = await api("/api/login", {
         method: "POST",
         body: JSON.stringify(Object.fromEntries(form.entries()))

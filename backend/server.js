@@ -12,8 +12,8 @@ const DATA_DIR = process.env.VERCEL
 const DB_PATH = path.join(DATA_DIR, "db.json");
 const SEED_PATH = path.join(ROOT, "data", "seed.json");
 const PORT = Number(process.env.PORT || 3001);
-
-const sessions = new Map();
+const AUTH_SECRET = process.env.AUTH_SECRET || "auto-calling-crm-dev-secret";
+const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function ensureDb() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -63,10 +63,43 @@ function parseBody(req) {
   });
 }
 
+function toBase64Url(value) {
+  return Buffer.from(value).toString("base64url");
+}
+
+function signToken(user) {
+  const payload = {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    exp: Date.now() + TOKEN_TTL_MS
+  };
+  const body = toBase64Url(JSON.stringify(payload));
+  const signature = crypto.createHmac("sha256", AUTH_SECRET).update(body).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function verifyToken(token) {
+  if (!token || !token.includes(".")) return null;
+  const [body, signature] = token.split(".");
+  const expected = crypto.createHmac("sha256", AUTH_SECRET).update(body).digest("base64url");
+  const left = Buffer.from(signature);
+  const right = Buffer.from(expected);
+  if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!payload?.exp || Date.now() > payload.exp) return null;
+    return { id: payload.id, name: payload.name, email: payload.email, role: payload.role };
+  } catch {
+    return null;
+  }
+}
+
 function getUser(req) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-  return token ? sessions.get(token) : null;
+  return verifyToken(token);
 }
 
 function requireUser(req, res) {
@@ -247,9 +280,8 @@ async function handleApi(req, res, pathname) {
     const body = await parseBody(req);
     const user = db.users.find((item) => item.email === body.email && item.password === body.password);
     if (!user) return sendJson(res, 401, { error: "Invalid email or password" });
-    const token = crypto.randomBytes(24).toString("hex");
     const safeUser = { id: user.id, name: user.name, email: user.email, role: user.role };
-    sessions.set(token, safeUser);
+    const token = signToken(safeUser);
     return sendJson(res, 200, { token, user: safeUser });
   }
 
