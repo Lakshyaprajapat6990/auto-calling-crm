@@ -245,10 +245,14 @@ function renderCampaigns() {
 function renderOutbound() {
   const campaignOptions = state.data.campaigns.map((campaign) => `<option value="${campaign.id}">${escapeHtml(campaign.name)}</option>`).join("");
   const customerOptions = state.data.customers.map((customer) => `<option value="${customer.id}">${escapeHtml(customer.name)} - ${escapeHtml(customer.phone)}</option>`).join("");
+  const latest = state.data.calls[0];
+  const latestNote = latest?.providerNote ? `<p class="message"><strong>Last call:</strong> ${escapeHtml(latest.status)} — ${escapeHtml(latest.providerNote)}</p>` : "";
   return html`
     <div class="panel">
-      <h2>Simulate Outbound Auto Call</h2>
+      <h2>Outbound Auto Call</h2>
       <div class="panel-body">
+        <p class="message">Twilio trial can call only verified numbers. Verify the phone in Twilio → Phone Numbers → Verified Caller IDs.</p>
+        ${latestNote}
         <form id="outboundForm" class="form-grid">
           <label>Campaign <select name="campaignId">${campaignOptions}</select></label>
           <label>Customer <select name="customerId">${customerOptions}</select></label>
@@ -260,7 +264,7 @@ function renderOutbound() {
               <option value="0">No key - Message only</option>
             </select>
           </label>
-          <button type="submit">Run Outbound Simulation</button>
+          <button type="submit">Start Live Call</button>
         </form>
       </div>
     </div>
@@ -355,9 +359,9 @@ function campaignsTable(campaigns) {
 }
 
 function callsTable(calls) {
-  if (!calls.length) return "<p>No calls yet. Run a simulation to create call history.</p>";
-  return html`<table><thead><tr><th>Type</th><th>Customer</th><th>Status</th><th>Executive</th><th>Provider</th><th>Outcome</th><th>Time</th></tr></thead><tbody>
-    ${calls.map((c) => `<tr><td>${escapeHtml(c.type)}</td><td>${escapeHtml(c.customerName)}<br>${escapeHtml(c.phone)}</td><td>${rowStatus(c.status)}</td><td>${escapeHtml(c.assignedEmployeeName || "-")}</td><td>${escapeHtml(c.provider || "simulation")}<br>${escapeHtml(c.providerStatus || "-")}</td><td>${escapeHtml(c.outcome || "-")}</td><td>${new Date(c.createdAt).toLocaleString()}</td></tr>`).join("")}
+  if (!calls.length) return "<p>No calls yet. Start an outbound call to create history.</p>";
+  return html`<table><thead><tr><th>Type</th><th>Customer</th><th>Status</th><th>Executive</th><th>Provider</th><th>Outcome / Note</th><th>Time</th></tr></thead><tbody>
+    ${calls.map((c) => `<tr><td>${escapeHtml(c.type)}</td><td>${escapeHtml(c.customerName)}<br>${escapeHtml(c.phone)}</td><td>${rowStatus(c.status)}</td><td>${escapeHtml(c.assignedEmployeeName || "-")}</td><td>${escapeHtml(c.provider || "simulation")}<br>${escapeHtml(c.providerStatus || "-")}</td><td>${escapeHtml(c.providerNote || c.outcome || "-")}</td><td>${new Date(c.createdAt).toLocaleString()}</td></tr>`).join("")}
   </tbody></table>`;
 }
 
