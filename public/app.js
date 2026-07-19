@@ -184,13 +184,14 @@ function renderCustomers() {
       <div class="panel-body">
         <form id="customerForm" class="form-grid">
           <label>Name <input name="name" required></label>
-          <label>Phone <input name="phone" required></label>
+          <label>Phone <input name="phone" type="tel" inputmode="tel" placeholder="+918602842351" required></label>
           <label>City <input name="city"></label>
           <label>Language <select name="language"><option>Hindi</option><option>English</option></select></label>
           <label>Product <input name="product"></label>
           <label>Notes <input name="notes"></label>
           <button type="submit">Add Customer</button>
         </form>
+        <p class="message">Tip: save phone as +91XXXXXXXXXX (example +918602842351). If you type 0860..., it will auto-convert to +91860...</p>
       </div>
     </div>
     <div class="panel"><h2>Customers</h2><div class="panel-body">${customersTable(state.data.customers)}</div></div>
@@ -204,7 +205,7 @@ function renderEmployees() {
       <div class="panel-body">
         <form id="employeeForm" class="form-grid">
           <label>Name <input name="name" required></label>
-          <label>Phone <input name="phone" required></label>
+          <label>Phone <input name="phone" type="tel" inputmode="tel" placeholder="+919800000001" required></label>
           <label>Email <input name="email" type="email"></label>
           <label>Department <select name="department"><option>Sales</option><option>Support</option><option>Payment</option></select></label>
           <label>Language <select name="language"><option>Hindi</option><option>English</option></select></label>
@@ -372,6 +373,15 @@ function formValues(form) {
   const multi = form.querySelector("select[multiple]");
   if (multi) {
     data[multi.name] = [...multi.selectedOptions].map((option) => option.value);
+  }
+  if (data.phone) {
+    let phone = String(data.phone).trim().replace(/[\s\-()]/g, "");
+    if (phone.startsWith("00")) phone = `+${phone.slice(2)}`;
+    if (/^0\d{10}$/.test(phone)) phone = `+91${phone.slice(1)}`;
+    if (/^91\d{10}$/.test(phone)) phone = `+${phone}`;
+    if (/^\d{10}$/.test(phone)) phone = `+91${phone}`;
+    if (!phone.startsWith("+")) phone = `+${phone}`;
+    data.phone = phone;
   }
   return data;
 }

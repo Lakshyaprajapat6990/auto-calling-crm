@@ -157,6 +157,17 @@ function makeId(prefix) {
   return `${prefix}_${crypto.randomBytes(5).toString("hex")}`;
 }
 
+function normalizePhone(value) {
+  let phone = String(value || "").trim().replace(/[\s\-()]/g, "");
+  if (!phone) return "";
+  if (phone.startsWith("00")) phone = `+${phone.slice(2)}`;
+  if (/^0\d{10}$/.test(phone)) phone = `+91${phone.slice(1)}`;
+  if (/^91\d{10}$/.test(phone)) phone = `+${phone}`;
+  if (/^\d{10}$/.test(phone)) phone = `+91${phone}`;
+  if (!phone.startsWith("+")) phone = `+${phone}`;
+  return phone;
+}
+
 function renderTemplate(template, customer) {
   return template.replace(/\{\{(\w+)\}\}/g, (_, key) => {
     if (key === "company") return "Auto Calling CRM";
@@ -478,7 +489,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
     const employee = {
       id: makeId("emp"),
       name: body.name,
-      phone: body.phone,
+      phone: normalizePhone(body.phone),
       email: body.email,
       department: body.department || "Sales",
       language: body.language || "Hindi",
@@ -495,7 +506,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
     const customer = {
       id: makeId("cus"),
       name: body.name,
-      phone: body.phone,
+      phone: normalizePhone(body.phone),
       city: body.city || "",
       language: body.language || "Hindi",
       product: body.product || "",
