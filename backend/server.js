@@ -9,7 +9,7 @@ const {
   buildIncomingTwiml,
   buildIvrResultTwiml
 } = require("./telephony");
-const { readStore: readDb, writeStore: writeDb, replaceStore: replaceDb } = require("./store");
+const { readStore: readDb, writeStore: writeDb, replaceStore: replaceDb, storageMode } = require("./store");
 const {
   hashPassword,
   verifyPassword,
@@ -329,7 +329,7 @@ function analytics(db) {
 }
 
 async function handleApi(req, res, pathname, searchParams = new URLSearchParams()) {
-  const db = readDb();
+  const db = await readDb();
   const config = getTelephonyConfig();
 
   if (req.method === "POST" && pathname === "/api/login") {
@@ -340,7 +340,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
     }
     if (!String(user.password).includes(":")) {
       user.password = hashPassword(body.password);
-      writeDb(db);
+      await writeDb(db);
     }
     const safeUser = { id: user.id, name: user.name, email: user.email, role: user.role };
     const token = signToken(safeUser);
@@ -366,7 +366,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
         providerStatus: body.CallStatus || "ringing",
         createdAt: new Date().toISOString()
       });
-      writeDb(db);
+      await writeDb(db);
       return sendTwiml(res, buildIncomingTwiml({ publicBaseUrl: config.publicBaseUrl }));
     }
     const result = simulateIncomingCall(db, {
@@ -376,7 +376,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       language: body.language || "Hindi",
       ivrChoice: body.ivrChoice || "1"
     });
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, result.call);
   }
 
@@ -432,7 +432,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
         existing.status = "completed";
         existing.outcome = "message_played";
       }
-      writeDb(db);
+      await writeDb(db);
     } else if (digits === "1") {
       const employee = findFreeEmployee(db, "Sales", "Hindi");
       transferNumber = employee?.phone || "";
@@ -453,7 +453,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
         }
         if (body.CallStatus === "in-progress") existing.status = "connected";
         if (body.CallStatus === "ringing") existing.status = "ringing";
-        writeDb(db);
+        await writeDb(db);
       }
     }
     return sendJson(res, 200, { ok: true });
@@ -471,7 +471,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
     db.recordings.unshift(recording);
     const existing = db.calls.find((item) => item.providerCallId === recording.providerCallId || item.id === recording.callId);
     if (existing && recording.url) existing.recordingUrl = recording.url;
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, recording);
   }
 
@@ -480,7 +480,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
 
   if (req.method === "POST" && pathname === "/api/db/sync") {
     const body = await parseBody(req);
-    const synced = replaceDb(body.db || body);
+    const synced = await replaceDb(body.db || body);
     return sendJson(res, 200, {
       ok: true,
       counts: {
@@ -493,7 +493,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       },
       settings: synced.settings,
       dnc: synced.dnc || [],
-      storage: process.env.DATABASE_URL ? "postgres" : process.env.VERCEL ? "serverless-memory+browser" : "local-file+browser"
+      storage: storageMode()
     });
   }
 
@@ -523,7 +523,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       online: body.online !== false
     };
     db.employees.unshift(employee);
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, employee);
   }
 
@@ -541,7 +541,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       optOut: false
     };
     db.customers.unshift(customer);
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, customer);
   }
 
@@ -557,7 +557,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       retryLimit: Number(body.retryLimit || 2)
     };
     db.campaigns.unshift(campaign);
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, campaign);
   }
 
@@ -568,7 +568,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       campaign: body.campaign
     });
     if (result.error) return sendJson(res, 400, result);
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, result.call);
   }
 
@@ -597,7 +597,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       campaign
     });
     if (result.error) return sendJson(res, 400, result);
-    writeDb(db);
+    await writeDb(db);
     const remaining = customerIds.filter((id) => {
       const customer = db.customers.find((item) => item.id === id);
       return customer && !customer.optOut && !isDncBlocked(db, customer.phone) && !called.has(id) && id !== nextCustomer.id;
@@ -629,7 +629,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       db.customers.unshift(customer);
       imported.push(customer);
     }
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, { imported: imported.length, customers: imported });
   }
 
@@ -656,14 +656,14 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       customer.optOut = true;
       customer.status = "opt_out";
     }
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, { ok: true, dnc: db.dnc });
   }
 
   if (req.method === "DELETE" && pathname.startsWith("/api/dnc/")) {
     const id = pathname.split("/")[3];
     db.dnc = (db.dnc || []).filter((item) => item.id !== id);
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 200, { ok: true, dnc: db.dnc });
   }
 
@@ -674,7 +674,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
   if (req.method === "PUT" && pathname === "/api/settings") {
     const body = await parseBody(req);
     db.settings = { ...db.settings, ...body };
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 200, db.settings);
   }
 
@@ -689,7 +689,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       return sendJson(res, 400, { error: "New password must be at least 6 characters" });
     }
     account.password = hashPassword(body.newPassword);
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 200, { ok: true });
   }
 
@@ -719,7 +719,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
         });
       }
     }
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 200, call);
   }
 
@@ -745,7 +745,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
   if (req.method === "POST" && pathname === "/api/simulate/incoming") {
     const body = await parseBody(req);
     const result = simulateIncomingCall(db, body);
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 201, result.call);
   }
 
@@ -755,7 +755,7 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
     if (!employee) return sendJson(res, 404, { error: "Employee not found" });
     employee.availability = "free";
     employee.online = true;
-    writeDb(db);
+    await writeDb(db);
     return sendJson(res, 200, employee);
   }
 
@@ -797,7 +797,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-readDb();
+readDb().catch((error) => {
+  console.error("Database init failed:", error.message);
+});
 
 if (!process.env.VERCEL) {
   server.listen(PORT, () => {

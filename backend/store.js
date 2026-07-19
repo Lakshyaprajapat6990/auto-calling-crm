@@ -1,5 +1,11 @@
-const { readDb, writeDb, replaceDb, loadSeed } = require("./db");
+const fileDb = require("./db");
 const { hashPassword } = require("./business");
+const {
+  isMongoEnabled,
+  readMongoStore,
+  writeMongoStore,
+  ensureCollections: ensureMongoCollections
+} = require("./mongo");
 
 function ensureCollections(db) {
   if (!Array.isArray(db.dnc)) db.dnc = [];
@@ -25,17 +31,25 @@ function ensureCollections(db) {
   return db;
 }
 
-function readStore() {
-  return ensureCollections(readDb());
+async function readStore() {
+  if (isMongoEnabled()) {
+    return ensureMongoCollections(await readMongoStore());
+  }
+  return ensureCollections(fileDb.readDb());
 }
 
-function writeStore(db) {
-  writeDb(ensureCollections(db));
+async function writeStore(db) {
+  const next = ensureCollections(db);
+  if (isMongoEnabled()) {
+    await writeMongoStore(next);
+    return;
+  }
+  fileDb.writeDb(next);
 }
 
-function replaceStore(db) {
-  const seed = loadSeed();
-  const merged = replaceDb({
+async function replaceStore(db) {
+  const seed = fileDb.loadSeed();
+  const merged = {
     users: db.users?.length ? db.users : seed.users,
     employees: db.employees || [],
     customers: db.customers || [],
@@ -45,17 +59,24 @@ function replaceStore(db) {
     recordings: db.recordings || [],
     dnc: db.dnc || [],
     settings: db.settings || {}
-  });
+  };
   const next = ensureCollections(merged);
   if (db.settings) next.settings = { ...next.settings, ...db.settings };
   if (Array.isArray(db.dnc)) next.dnc = db.dnc;
-  writeStore(next);
+  await writeStore(next);
   return readStore();
+}
+
+function storageMode() {
+  if (isMongoEnabled()) return "mongodb";
+  if (process.env.VERCEL) return "serverless-memory+browser";
+  return "local-file+browser";
 }
 
 module.exports = {
   readStore,
   writeStore,
   replaceStore,
-  ensureCollections
+  ensureCollections,
+  storageMode
 };

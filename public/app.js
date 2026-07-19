@@ -165,6 +165,30 @@ async function api(path, options = {}) {
 
 async function refresh() {
   const telephony = await api("/api/telephony/config");
+  try {
+    const exported = await api("/api/db/export");
+    state.data = {
+      analytics: {},
+      employees: exported.employees || [],
+      customers: exported.customers || [],
+      campaigns: exported.campaigns || [],
+      calls: exported.calls || [],
+      callbacks: exported.callbacks || [],
+      dnc: exported.dnc || [],
+      telephony
+    };
+    if (exported.settings) {
+      state.settings = { ...state.settings, ...exported.settings };
+      saveSettings();
+    }
+    state.data.analytics = computeAnalytics(state.data);
+    saveLocalData();
+    state.storageMode = "mongodb";
+    return;
+  } catch {
+    // Fall back to local cache if export is unavailable.
+  }
+
   const local = loadLocalData();
   if (local) {
     state.data = {
@@ -190,7 +214,7 @@ async function refresh() {
     api("/api/calls"),
     api("/api/callbacks")
   ]);
-  state.data = { analytics: {}, employees, customers, campaigns, calls, callbacks, telephony };
+  state.data = { analytics: {}, employees, customers, campaigns, calls, callbacks, dnc: [], telephony };
   state.data.analytics = computeAnalytics(state.data);
   saveLocalData();
 }
