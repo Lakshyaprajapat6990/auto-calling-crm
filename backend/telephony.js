@@ -1,14 +1,124 @@
+const https = require("https");
+
 function getTelephonyConfig() {
   return {
     mode: process.env.CALL_MODE || "simulation",
     provider: process.env.TELEPHONY_PROVIDER || "simulation",
     companyCallerId: process.env.COMPANY_CALLER_ID || "",
-    publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`
+    publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3001}`
   };
 }
 
 function isLiveMode() {
   return getTelephonyConfig().mode === "live";
+}
+
+function escapeXml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function buildOutboundTwiml({ message, publicBaseUrl, callId }) {
+  const action = `${publicBaseUrl}/api/telephony/ivr?callId=${encodeURIComponent(callId || "")}`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">${escapeXml(message || "Hello from Auto Calling CRM.")}</Say>
+  <Gather numDigits="1" timeout="8" action="${escapeXml(action)}" method="POST">
+    <Say voice="alice">Press 1 to talk to an executive. Press 2 for a callback. Press 9 to opt out.</Say>
+  </Gather>
+  <Say voice="alice">We did not receive any input. Goodbye.</Say>
+</Response>`;
+}
+
+function buildIncomingTwiml({ publicBaseUrl }) {
+  const action = `${publicBaseUrl}/api/telephony/ivr`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather numDigits="1" timeout="8" action="${escapeXml(action)}" method="POST">
+    <Say voice="alice">Welcome to Auto Calling CRM. Press 1 for Sales. Press 2 for Support. Press 3 for a callback.</Say>
+  </Gather>
+  <Say voice="alice">We did not receive any input. Goodbye.</Say>
+</Response>`;
+}
+
+function buildIvrResultTwiml({ digits, transferNumber }) {
+  if (digits === "1" && transferNumber) {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Connecting you to an executive now.</Say>
+  <Dial>${escapeXml(transferNumber)}</Dial>
+</Response>`;
+  }
+  if (digits === "1") {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Sorry, no executive is free right now. We will call you back.</Say>
+</Response>`;
+  }
+  if (digits === "2" || digits === "3") {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Thank you. We have scheduled a callback.</Say>
+</Response>`;
+  }
+  if (digits === "9") {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">You have been opted out. Goodbye.</Say>
+</Response>`;
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Thank you for calling. Goodbye.</Say>
+</Response>`;
+}
+
+function twilioRequest(pathName, form) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const body = new URLSearchParams(form).toString();
+  const auth = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: "api.twilio.com",
+        path: pathName,
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Length": Buffer.byteLength(body)
+        }
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => {
+          let parsed = {};
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            parsed = { raw: data };
+          }
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(parsed);
+          } else {
+            reject(new Error(parsed.message || parsed.raw || `Twilio error ${res.statusCode}`));
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 async function startOutboundCall({ customer, campaign, call }) {
@@ -30,7 +140,7 @@ async function startOutboundCall({ customer, campaign, call }) {
     provider: config.provider,
     providerCallId: null,
     status: "not_configured",
-    note: `Live adapter for ${config.provider} is not implemented yet. Add provider API credentials and adapter code.`
+    note: `Live adapter for ${config.provider} is not implemented yet.`
   };
 }
 
@@ -46,17 +156,41 @@ async function startTwilioCall({ config, customer, call }) {
     };
   }
 
-  return {
-    provider: "twilio",
-    providerCallId: null,
-    status: "adapter_ready",
-    note: `Ready to call ${customer.phone} from ${process.env.TWILIO_FROM_NUMBER}. Install provider SDK or use HTTPS API in the next step.`,
-    webhookUrl: `${config.publicBaseUrl}/api/telephony/ivr?callId=${encodeURIComponent(call.id)}`
-  };
+  const twimlUrl = `${config.publicBaseUrl}/api/telephony/ivr?callId=${encodeURIComponent(call.id)}&mode=outbound`;
+  const statusUrl = `${config.publicBaseUrl}/api/telephony/status`;
+
+  try {
+    const result = await twilioRequest(`/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Calls.json`, {
+      To: customer.phone,
+      From: process.env.TWILIO_FROM_NUMBER,
+      Url: twimlUrl,
+      Method: "POST",
+      StatusCallback: statusUrl,
+      StatusCallbackMethod: "POST"
+    });
+
+    return {
+      provider: "twilio",
+      providerCallId: result.sid || null,
+      status: result.status || "queued",
+      note: `Live call started to ${customer.phone} from ${process.env.TWILIO_FROM_NUMBER}`,
+      webhookUrl: twimlUrl
+    };
+  } catch (error) {
+    return {
+      provider: "twilio",
+      providerCallId: null,
+      status: "failed",
+      note: error.message
+    };
+  }
 }
 
 module.exports = {
   getTelephonyConfig,
   isLiveMode,
-  startOutboundCall
+  startOutboundCall,
+  buildOutboundTwiml,
+  buildIncomingTwiml,
+  buildIvrResultTwiml
 };
