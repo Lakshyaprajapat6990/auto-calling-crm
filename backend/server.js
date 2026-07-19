@@ -143,8 +143,9 @@ function normalizePhone(value) {
 }
 
 function renderTemplate(template, customer) {
+  const company = process.env.COMPANY_NAME || "Auto Calling CRM";
   return template.replace(/\{\{(\w+)\}\}/g, (_, key) => {
-    if (key === "company") return "Auto Calling CRM";
+    if (key === "company") return company;
     return customer[key] ?? "";
   });
 }

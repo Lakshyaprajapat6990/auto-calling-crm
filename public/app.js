@@ -1,10 +1,23 @@
 const app = document.querySelector("#app");
-const STORAGE_KEY = "auto_calling_crm_data_v1";
+const STORAGE_KEY = "auto_calling_crm_data_v2";
+const SETTINGS_KEY = "auto_calling_crm_settings_v1";
+
+const defaultSettings = () => ({
+  companyName: "Auto Calling CRM",
+  industry: "Business",
+  timezone: "Asia/Kolkata",
+  callingHoursStart: "09:00",
+  callingHoursEnd: "19:00",
+  defaultLanguage: "Hindi",
+  supportEmail: "support@company.local"
+});
 
 const state = {
   token: localStorage.getItem("token") || "",
   user: null,
   page: "dashboard",
+  editing: { customerId: "", employeeId: "", campaignId: "" },
+  settings: loadSettings(),
   data: {
     analytics: {},
     employees: [],
@@ -16,26 +29,49 @@ const state = {
   }
 };
 
-const pages = [
-  ["dashboard", "Dashboard"],
-  ["customers", "Customers"],
-  ["employees", "Employees"],
-  ["campaigns", "Campaigns"],
-  ["outbound", "Outbound Demo"],
-  ["incoming", "Incoming Demo"],
-  ["telephony", "Telephony"],
-  ["callbacks", "Callbacks"],
-  ["reports", "Reports"]
+const allPages = [
+  ["dashboard", "Dashboard", "all"],
+  ["customers", "Customers", "all"],
+  ["employees", "Employees", "admin"],
+  ["campaigns", "Campaigns", "admin"],
+  ["outbound", "Outbound Calls", "all"],
+  ["incoming", "Incoming Calls", "all"],
+  ["callbacks", "Callbacks", "all"],
+  ["reports", "Reports", "all"],
+  ["telephony", "Calling Setup", "admin"],
+  ["settings", "Settings", "admin"]
 ];
+
+function visiblePages() {
+  const role = state.user?.role || "admin";
+  return allPages.filter(([, , access]) => access === "all" || role === "admin");
+}
+
+function isAdmin() {
+  return (state.user?.role || "admin") === "admin";
+}
 
 function makeLocalId(prefix) {
   return `${prefix}_${Math.random().toString(16).slice(2, 12)}`;
+}
+
+function loadSettings() {
+  try {
+    return { ...defaultSettings(), ...(JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") || {}) };
+  } catch {
+    return defaultSettings();
+  }
+}
+
+function saveSettings() {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
 }
 
 function computeAnalytics(data) {
   const calls = data.calls || [];
   const callbacks = data.callbacks || [];
   const employees = data.employees || [];
+  const optedOut = (data.customers || []).filter((c) => c.optOut).length;
   return {
     totalCustomers: (data.customers || []).length,
     totalEmployees: employees.length,
@@ -43,14 +79,19 @@ function computeAnalytics(data) {
     totalCalls: calls.length,
     transferred: calls.filter((call) => call.status === "transferred").length,
     callbacks: callbacks.filter((callback) => callback.status === "pending").length,
-    freeEmployees: employees.filter((employee) => employee.online && employee.availability === "free").length
+    freeEmployees: employees.filter((employee) => employee.online && employee.availability === "free").length,
+    optedOut,
+    failed: calls.filter((call) => call.status === "failed").length
   };
 }
 
 function loadLocalData() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
+    if (!raw) {
+      const legacy = localStorage.getItem("auto_calling_crm_data_v1");
+      return legacy ? JSON.parse(legacy) : null;
+    }
     return JSON.parse(raw);
   } catch {
     return null;
@@ -85,7 +126,7 @@ async function syncToServer() {
       })
     });
   } catch {
-    // Keep local data even if server sync fails on a cold instance.
+    // Keep local data even if server sync fails.
   }
 }
 
@@ -151,16 +192,40 @@ function rowStatus(value) {
   return `<span class="status ${escapeHtml(value)}">${escapeHtml(value)}</span>`;
 }
 
+function normalizePhoneValue(value) {
+  let phone = String(value || "").trim().replace(/[\s\-()]/g, "");
+  if (!phone) return "";
+  if (phone.startsWith("00")) phone = `+${phone.slice(2)}`;
+  if (/^0\d{10}$/.test(phone)) phone = `+91${phone.slice(1)}`;
+  if (/^91\d{10}$/.test(phone)) phone = `+${phone}`;
+  if (/^\d{10}$/.test(phone)) phone = `+91${phone}`;
+  if (!phone.startsWith("+")) phone = `+${phone}`;
+  return phone;
+}
+
+function formValues(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const multi = form.querySelector("select[multiple]");
+  if (multi) data[multi.name] = [...multi.selectedOptions].map((option) => option.value);
+  if (data.phone) data.phone = normalizePhoneValue(data.phone);
+  return data;
+}
+
+function confirmDelete(label) {
+  return window.confirm(`Delete this ${label}? This cannot be undone.`);
+}
+
 function renderLogin(message = "") {
   app.innerHTML = html`
     <section class="login">
       <form class="login-card" id="loginForm">
-        <h1>Auto Calling CRM</h1>
-        <p>Login to manage campaigns, customers, executives, and simulated call flows.</p>
+        <h1>${escapeHtml(state.settings.companyName || "Auto Calling CRM")}</h1>
+        <p>Sign in to manage customers, campaigns, executives, and live calling.</p>
         <label>Email <input name="email" value="admin@autocalling.local" required></label>
         <label>Password <input name="password" type="password" value="admin123" required></label>
         <button type="submit">Login</button>
         <div class="message">${escapeHtml(message)}</div>
+        <p class="message">Admin: admin@autocalling.local / admin123<br>Agent: agent@autocalling.local / agent123</p>
       </form>
     </section>
   `;
@@ -186,10 +251,12 @@ function renderLogin(message = "") {
 }
 
 function renderApp() {
+  const pages = visiblePages();
+  if (!pages.some(([id]) => id === state.page)) state.page = "dashboard";
   app.innerHTML = html`
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="brand">Auto Calling<br>CRM</div>
+        <div class="brand">${escapeHtml(state.settings.companyName || "Auto Calling")}<br><small>CRM</small></div>
         <div class="nav">
           ${pages.map(([id, label]) => `<button class="${state.page === id ? "active" : ""}" data-page="${id}">${label}</button>`).join("")}
         </div>
@@ -198,7 +265,7 @@ function renderApp() {
         <div class="topbar">
           <div>
             <h1>${pages.find(([id]) => id === state.page)?.[1] || "Dashboard"}</h1>
-            <p>Logged in as ${escapeHtml(state.user?.name || "Admin")}</p>
+            <p>${escapeHtml(state.user?.name || "User")} · ${escapeHtml(state.user?.role || "admin")}</p>
           </div>
           <div class="actions">
             <button class="secondary" id="refreshBtn">Refresh</button>
@@ -237,7 +304,8 @@ function renderPage() {
     incoming: renderIncoming,
     telephony: renderTelephony,
     callbacks: renderCallbacks,
-    reports: renderReports
+    reports: renderReports,
+    settings: renderSettings
   }[state.page]();
 }
 
@@ -250,28 +318,37 @@ function renderDashboard() {
       <div class="card">Campaigns<strong>${a.totalCampaigns || 0}</strong></div>
       <div class="card">Pending callbacks<strong>${a.callbacks || 0}</strong></div>
     </div>
+    <div class="grid" style="margin-top:14px">
+      <div class="card">Total calls<strong>${a.totalCalls || 0}</strong></div>
+      <div class="card">Transferred<strong>${a.transferred || 0}</strong></div>
+      <div class="card">Failed<strong>${a.failed || 0}</strong></div>
+      <div class="card">Opted out<strong>${a.optedOut || 0}</strong></div>
+    </div>
     <div class="split">
-      <div class="panel"><h2>Recent Calls</h2><div class="panel-body">${callsTable(state.data.calls.slice(0, 5))}</div></div>
+      <div class="panel"><h2>Recent Calls</h2><div class="panel-body">${callsTable(state.data.calls.slice(0, 5), true)}</div></div>
       <div class="panel"><h2>Employee Availability</h2><div class="panel-body">${employeesTable(state.data.employees)}</div></div>
     </div>
   `;
 }
 
 function renderCustomers() {
+  const editing = state.data.customers.find((c) => c.id === state.editing.customerId);
   return html`
     <div class="panel">
-      <h2>Add Customer</h2>
+      <h2>${editing ? "Edit Customer" : "Add Customer"}</h2>
       <div class="panel-body">
         <form id="customerForm" class="form-grid">
-          <label>Name <input name="name" required></label>
-          <label>Phone <input name="phone" type="tel" inputmode="tel" placeholder="+918602842351" required></label>
-          <label>City <input name="city"></label>
-          <label>Language <select name="language"><option>Hindi</option><option>English</option></select></label>
-          <label>Product <input name="product"></label>
-          <label>Notes <input name="notes"></label>
-          <button type="submit">Add Customer</button>
+          <input type="hidden" name="id" value="${escapeHtml(editing?.id || "")}">
+          <label>Name <input name="name" value="${escapeHtml(editing?.name || "")}" required></label>
+          <label>Phone <input name="phone" type="tel" inputmode="tel" placeholder="+91XXXXXXXXXX" value="${escapeHtml(editing?.phone || "")}" required></label>
+          <label>City <input name="city" value="${escapeHtml(editing?.city || "")}"></label>
+          <label>Language <select name="language"><option ${editing?.language === "Hindi" || !editing ? "selected" : ""}>Hindi</option><option ${editing?.language === "English" ? "selected" : ""}>English</option></select></label>
+          <label>Product <input name="product" value="${escapeHtml(editing?.product || "")}"></label>
+          <label>Notes <input name="notes" value="${escapeHtml(editing?.notes || "")}"></label>
+          <button type="submit">${editing ? "Update Customer" : "Add Customer"}</button>
+          ${editing ? `<button type="button" class="secondary" id="cancelCustomerEdit">Cancel</button>` : ""}
         </form>
-        <p class="message">Tip: save phone as +91XXXXXXXXXX. Your customers are saved in this browser, so Refresh will not clear them.</p>
+        <p class="message">Use international format (+91...). Opt-out customers are blocked from outbound calls.</p>
       </div>
     </div>
     <div class="panel"><h2>Customers</h2><div class="panel-body">${customersTable(state.data.customers)}</div></div>
@@ -279,18 +356,21 @@ function renderCustomers() {
 }
 
 function renderEmployees() {
+  const editing = state.data.employees.find((e) => e.id === state.editing.employeeId);
   return html`
     <div class="panel">
-      <h2>Add Employee</h2>
+      <h2>${editing ? "Edit Employee" : "Add Employee"}</h2>
       <div class="panel-body">
         <form id="employeeForm" class="form-grid">
-          <label>Name <input name="name" required></label>
-          <label>Phone <input name="phone" type="tel" inputmode="tel" placeholder="+919800000001" required></label>
-          <label>Email <input name="email" type="email"></label>
+          <input type="hidden" name="id" value="${escapeHtml(editing?.id || "")}">
+          <label>Name <input name="name" value="${escapeHtml(editing?.name || "")}" required></label>
+          <label>Phone <input name="phone" type="tel" value="${escapeHtml(editing?.phone || "")}" required></label>
+          <label>Email <input name="email" type="email" value="${escapeHtml(editing?.email || "")}"></label>
           <label>Department <select name="department"><option>Sales</option><option>Support</option><option>Payment</option></select></label>
           <label>Language <select name="language"><option>Hindi</option><option>English</option></select></label>
           <label>Status <select name="availability"><option>free</option><option>busy</option></select></label>
-          <button type="submit">Add Employee</button>
+          <button type="submit">${editing ? "Update Employee" : "Add Employee"}</button>
+          ${editing ? `<button type="button" class="secondary" id="cancelEmployeeEdit">Cancel</button>` : ""}
         </form>
       </div>
     </div>
@@ -299,22 +379,32 @@ function renderEmployees() {
 }
 
 function renderCampaigns() {
-  const customerOptions = state.data.customers.map((customer) => `<option value="${customer.id}" selected>${escapeHtml(customer.name)}</option>`).join("");
+  const editing = state.data.campaigns.find((c) => c.id === state.editing.campaignId);
+  const selected = new Set(editing?.customerIds || state.data.customers.map((c) => c.id));
+  const customerOptions = state.data.customers
+    .map((customer) => `<option value="${customer.id}" ${selected.has(customer.id) ? "selected" : ""}>${escapeHtml(customer.name)}</option>`)
+    .join("");
+  const defaultMessage = `Hello {{name}}, this is ${state.settings.companyName} calling about your {{product}}. Press 1 to talk to our executive, press 2 for callback, or press 9 to opt out.`;
   return html`
     <div class="panel">
-      <h2>Create Campaign</h2>
+      <h2>${editing ? "Edit Campaign" : "Create Campaign"}</h2>
       <div class="panel-body">
         <form id="campaignForm">
+          <input type="hidden" name="id" value="${escapeHtml(editing?.id || "")}">
           <div class="form-grid">
-            <label>Name <input name="name" required></label>
+            <label>Name <input name="name" value="${escapeHtml(editing?.name || "")}" required></label>
             <label>Department <select name="department"><option>Sales</option><option>Support</option><option>Payment</option></select></label>
-            <label>Retry Limit <input name="retryLimit" type="number" value="2"></label>
+            <label>Status <select name="status"><option value="draft">draft</option><option value="active">active</option><option value="paused">paused</option></select></label>
+            <label>Retry Limit <input name="retryLimit" type="number" value="${escapeHtml(editing?.retryLimit || 2)}"></label>
           </div>
           <label>Message Template
-            <textarea name="messageTemplate">Hello {{name}}, this is Auto Calling CRM calling about your {{product}}. Press 1 to talk to our executive, press 2 for callback, or press 9 to opt out.</textarea>
+            <textarea name="messageTemplate">${escapeHtml(editing?.messageTemplate || defaultMessage)}</textarea>
           </label>
           <label>Customers <select name="customerIds" multiple size="4">${customerOptions}</select></label>
-          <button type="submit">Create Campaign</button>
+          <div class="actions" style="margin-top:12px">
+            <button type="submit">${editing ? "Update Campaign" : "Create Campaign"}</button>
+            ${editing ? `<button type="button" class="secondary" id="cancelCampaignEdit">Cancel</button>` : ""}
+          </div>
         </form>
       </div>
     </div>
@@ -323,51 +413,52 @@ function renderCampaigns() {
 }
 
 function renderOutbound() {
+  const activeCustomers = state.data.customers.filter((c) => !c.optOut);
   const campaignOptions = state.data.campaigns.map((campaign) => `<option value="${campaign.id}">${escapeHtml(campaign.name)}</option>`).join("");
-  const customerOptions = state.data.customers.map((customer) => `<option value="${customer.id}">${escapeHtml(customer.name)} - ${escapeHtml(customer.phone)}</option>`).join("");
+  const customerOptions = activeCustomers.map((customer) => `<option value="${customer.id}">${escapeHtml(customer.name)} - ${escapeHtml(customer.phone)}</option>`).join("");
   const latest = state.data.calls[0];
   const latestNote = latest?.providerNote ? `<p class="message"><strong>Last call:</strong> ${escapeHtml(latest.status)} — ${escapeHtml(latest.providerNote)}</p>` : "";
   return html`
     <div class="panel">
-      <h2>Outbound Auto Call</h2>
+      <h2>Start Outbound Call</h2>
       <div class="panel-body">
-        <p class="message">Twilio trial can call only verified numbers. Verify the phone in Twilio → Phone Numbers → Verified Caller IDs.</p>
+        <p class="message">Live mode uses your telephony provider. Twilio trial can call only verified numbers.</p>
         ${latestNote}
         <form id="outboundForm" class="form-grid">
           <label>Campaign <select name="campaignId">${campaignOptions}</select></label>
           <label>Customer <select name="customerId">${customerOptions}</select></label>
-          <label>Customer Choice
+          <label>Expected IVR choice (simulation helper)
             <select name="ivrChoice">
-              <option value="1">Press 1 - Talk to executive</option>
-              <option value="2">Press 2 - Callback</option>
-              <option value="9">Press 9 - Opt out</option>
-              <option value="0">No key - Message only</option>
+              <option value="1">1 - Talk to executive</option>
+              <option value="2">2 - Callback</option>
+              <option value="9">9 - Opt out</option>
+              <option value="0">0 - Message only</option>
             </select>
           </label>
-          <button type="submit">Start Live Call</button>
+          <button type="submit">Start Call</button>
         </form>
       </div>
     </div>
-    <div class="panel"><h2>Latest Calls</h2><div class="panel-body">${callsTable(state.data.calls)}</div></div>
+    <div class="panel"><h2>Call History</h2><div class="panel-body">${callsTable(state.data.calls, true)}</div></div>
   `;
 }
 
 function renderIncoming() {
   return html`
     <div class="panel">
-      <h2>Simulate Incoming Call</h2>
+      <h2>Log / Test Incoming Call</h2>
       <div class="panel-body">
         <form id="incomingForm" class="form-grid">
-          <label>Name <input name="name" value="New Incoming Customer"></label>
+          <label>Name <input name="name" value="Incoming Customer"></label>
           <label>Phone <input name="phone" value="+919700009999"></label>
           <label>Department <select name="department"><option>Sales</option><option>Support</option><option>Payment</option></select></label>
           <label>Language <select name="language"><option>Hindi</option><option>English</option></select></label>
           <label>Choice <select name="ivrChoice"><option value="1">Talk to executive</option><option value="3">Callback</option></select></label>
-          <button type="submit">Run Incoming Simulation</button>
+          <button type="submit">Process Incoming Call</button>
         </form>
       </div>
     </div>
-    <div class="panel"><h2>Incoming and Outbound Calls</h2><div class="panel-body">${callsTable(state.data.calls)}</div></div>
+    <div class="panel"><h2>Call History</h2><div class="panel-body">${callsTable(state.data.calls, true)}</div></div>
   `;
 }
 
@@ -377,18 +468,18 @@ function renderCallbacks() {
 
 function renderTelephony() {
   const config = state.data.telephony;
-  const base = config.publicBaseUrl || "http://localhost:3000";
+  const base = config.publicBaseUrl || window.location.origin;
   return html`
     <div class="grid">
       <div class="card">Mode<strong>${escapeHtml(config.mode || "simulation")}</strong></div>
-      <div class="card">Provider<strong>${escapeHtml(config.provider || "simulation")}</strong></div>
+      <div class="card">Provider<strong>${escapeHtml(config.provider || "twilio")}</strong></div>
       <div class="card">Caller ID<strong>${escapeHtml(config.companyCallerId || "Not set")}</strong></div>
-      <div class="card">Base URL<strong>${escapeHtml(base)}</strong></div>
+      <div class="card">Public URL<strong>${escapeHtml(base)}</strong></div>
     </div>
     <div class="panel">
-      <h2>Go Live Webhook URLs</h2>
+      <h2>Provider Webhook URLs</h2>
       <div class="panel-body">
-        <p>Set these URLs inside your telephony provider dashboard after deployment or tunnel setup.</p>
+        <p>Configure these in your telephony provider dashboard.</p>
         <table>
           <thead><tr><th>Purpose</th><th>URL</th></tr></thead>
           <tbody>
@@ -398,7 +489,7 @@ function renderTelephony() {
             <tr><td>Recording</td><td>${escapeHtml(base)}/api/telephony/recording</td></tr>
           </tbody>
         </table>
-        <p class="message">Current app is safe in simulation mode. To place real calls, copy .env.example to .env, set CALL_MODE=live, add provider credentials, and deploy with HTTPS.</p>
+        <p class="message">Provider API keys are set in server environment variables (.env / Vercel), not in the browser, for security.</p>
       </div>
     </div>
   `;
@@ -406,68 +497,176 @@ function renderTelephony() {
 
 function renderReports() {
   const a = state.data.analytics;
+  const opted = state.data.customers.filter((c) => c.optOut);
   return html`
     <div class="grid">
       <div class="card">Total calls<strong>${a.totalCalls || 0}</strong></div>
       <div class="card">Transferred<strong>${a.transferred || 0}</strong></div>
-      <div class="card">Free employees<strong>${a.freeEmployees || 0}</strong></div>
-      <div class="card">Callbacks<strong>${a.callbacks || 0}</strong></div>
+      <div class="card">Failed<strong>${a.failed || 0}</strong></div>
+      <div class="card">Opt-outs<strong>${a.optedOut || 0}</strong></div>
     </div>
-    <div class="panel"><h2>Call Report</h2><div class="panel-body">${callsTable(state.data.calls)}</div></div>
+    <div class="panel"><h2>Call Report</h2><div class="panel-body">${callsTable(state.data.calls, true)}</div></div>
+    <div class="panel"><h2>Opt-out List</h2><div class="panel-body">${
+      opted.length
+        ? `<table><thead><tr><th>Name</th><th>Phone</th><th>Status</th></tr></thead><tbody>${opted
+            .map((c) => `<tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.phone)}</td><td>${rowStatus("opt_out")}</td></tr>`)
+            .join("")}</tbody></table>`
+        : "<p>No opted-out customers.</p>"
+    }</div></div>
+  `;
+}
+
+function renderSettings() {
+  const s = state.settings;
+  return html`
+    <div class="panel">
+      <h2>Company Profile</h2>
+      <div class="panel-body">
+        <form id="settingsForm" class="form-grid">
+          <label>Company Name <input name="companyName" value="${escapeHtml(s.companyName)}" required></label>
+          <label>Industry <input name="industry" value="${escapeHtml(s.industry)}"></label>
+          <label>Support Email <input name="supportEmail" type="email" value="${escapeHtml(s.supportEmail)}"></label>
+          <label>Timezone <input name="timezone" value="${escapeHtml(s.timezone)}"></label>
+          <label>Calling Hours Start <input name="callingHoursStart" type="time" value="${escapeHtml(s.callingHoursStart)}"></label>
+          <label>Calling Hours End <input name="callingHoursEnd" type="time" value="${escapeHtml(s.callingHoursEnd)}"></label>
+          <label>Default Language <select name="defaultLanguage"><option ${s.defaultLanguage === "Hindi" ? "selected" : ""}>Hindi</option><option ${s.defaultLanguage === "English" ? "selected" : ""}>English</option></select></label>
+          <button type="submit">Save Settings</button>
+        </form>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Data Management</h2>
+      <div class="panel-body">
+        <p class="message">Use these tools before handing the system to a client, or when cleaning demo data.</p>
+        <div class="actions">
+          <button class="secondary" id="clearCallsBtn">Clear Call History</button>
+          <button class="secondary" id="clearCallbacksBtn">Clear Callbacks</button>
+          <button class="danger" id="resetAllBtn">Reset All CRM Data</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Roles</h2>
+      <div class="panel-body">
+        <table>
+          <thead><tr><th>Role</th><th>Access</th><th>Login</th></tr></thead>
+          <tbody>
+            <tr><td>Admin</td><td>Full access including Settings, Employees, Campaigns, delete/reset</td><td>admin@autocalling.local / admin123</td></tr>
+            <tr><td>Agent</td><td>Dashboard, Customers, Calls, Callbacks, Reports</td><td>agent@autocalling.local / agent123</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   `;
 }
 
 function customersTable(customers) {
   if (!customers.length) return "<p>No customers yet.</p>";
-  return html`<table><thead><tr><th>Name</th><th>Phone</th><th>City</th><th>Product</th><th>Status</th></tr></thead><tbody>
-    ${customers.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.phone)}</td><td>${escapeHtml(c.city)}</td><td>${escapeHtml(c.product)}</td><td>${rowStatus(c.optOut ? "opt_out" : c.status)}</td></tr>`).join("")}
+  return html`<table><thead><tr><th>Name</th><th>Phone</th><th>City</th><th>Product</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+    ${customers
+      .map(
+        (c) => `<tr>
+      <td>${escapeHtml(c.name)}</td>
+      <td>${escapeHtml(c.phone)}</td>
+      <td>${escapeHtml(c.city)}</td>
+      <td>${escapeHtml(c.product)}</td>
+      <td>${rowStatus(c.optOut ? "opt_out" : c.status)}</td>
+      <td class="actions">
+        <button class="secondary" data-edit-customer="${c.id}">Edit</button>
+        <button class="secondary" data-optout-customer="${c.id}">${c.optOut ? "Undo Opt-out" : "Opt-out"}</button>
+        ${isAdmin() ? `<button class="danger" data-delete-customer="${c.id}">Delete</button>` : ""}
+      </td>
+    </tr>`
+      )
+      .join("")}
   </tbody></table>`;
 }
 
 function employeesTable(employees, withAction = false) {
   if (!employees.length) return "<p>No employees yet.</p>";
-  return html`<table><thead><tr><th>Name</th><th>Department</th><th>Language</th><th>Status</th>${withAction ? "<th>Action</th>" : ""}</tr></thead><tbody>
-    ${employees.map((e) => `<tr><td>${escapeHtml(e.name)}</td><td>${escapeHtml(e.department)}</td><td>${escapeHtml(e.language)}</td><td>${rowStatus(e.availability)}</td>${withAction ? `<td><button class="secondary" data-free="${e.id}">Mark Free</button></td>` : ""}</tr>`).join("")}
+  return html`<table><thead><tr><th>Name</th><th>Department</th><th>Language</th><th>Phone</th><th>Status</th>${withAction ? "<th>Actions</th>" : ""}</tr></thead><tbody>
+    ${employees
+      .map(
+        (e) => `<tr>
+      <td>${escapeHtml(e.name)}</td>
+      <td>${escapeHtml(e.department)}</td>
+      <td>${escapeHtml(e.language)}</td>
+      <td>${escapeHtml(e.phone)}</td>
+      <td>${rowStatus(e.availability)}</td>
+      ${
+        withAction
+          ? `<td class="actions">
+        <button class="secondary" data-free="${e.id}">Mark Free</button>
+        ${isAdmin() ? `<button class="secondary" data-edit-employee="${e.id}">Edit</button>` : ""}
+        ${isAdmin() ? `<button class="danger" data-delete-employee="${e.id}">Delete</button>` : ""}
+      </td>`
+          : ""
+      }
+    </tr>`
+      )
+      .join("")}
   </tbody></table>`;
 }
 
 function campaignsTable(campaigns) {
   if (!campaigns.length) return "<p>No campaigns yet.</p>";
-  return html`<table><thead><tr><th>Name</th><th>Department</th><th>Status</th><th>Customers</th><th>Message</th></tr></thead><tbody>
-    ${campaigns.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.department)}</td><td>${rowStatus(c.status)}</td><td>${c.customerIds.length}</td><td>${escapeHtml(c.messageTemplate)}</td></tr>`).join("")}
+  return html`<table><thead><tr><th>Name</th><th>Department</th><th>Status</th><th>Customers</th><th>Message</th><th>Actions</th></tr></thead><tbody>
+    ${campaigns
+      .map(
+        (c) => `<tr>
+      <td>${escapeHtml(c.name)}</td>
+      <td>${escapeHtml(c.department)}</td>
+      <td>${rowStatus(c.status)}</td>
+      <td>${(c.customerIds || []).length}</td>
+      <td>${escapeHtml(c.messageTemplate)}</td>
+      <td class="actions">
+        <button class="secondary" data-edit-campaign="${c.id}">Edit</button>
+        ${isAdmin() ? `<button class="danger" data-delete-campaign="${c.id}">Delete</button>` : ""}
+      </td>
+    </tr>`
+      )
+      .join("")}
   </tbody></table>`;
 }
 
-function callsTable(calls) {
-  if (!calls.length) return "<p>No calls yet. Start an outbound call to create history.</p>";
-  return html`<table><thead><tr><th>Type</th><th>Customer</th><th>Status</th><th>Executive</th><th>Provider</th><th>Outcome / Note</th><th>Time</th></tr></thead><tbody>
-    ${calls.map((c) => `<tr><td>${escapeHtml(c.type)}</td><td>${escapeHtml(c.customerName)}<br>${escapeHtml(c.phone)}</td><td>${rowStatus(c.status)}</td><td>${escapeHtml(c.assignedEmployeeName || "-")}</td><td>${escapeHtml(c.provider || "simulation")}<br>${escapeHtml(c.providerStatus || "-")}</td><td>${escapeHtml(c.providerNote || c.outcome || "-")}</td><td>${new Date(c.createdAt).toLocaleString()}</td></tr>`).join("")}
+function callsTable(calls, withDelete = false) {
+  if (!calls.length) return "<p>No calls yet.</p>";
+  return html`<table><thead><tr><th>Type</th><th>Customer</th><th>Status</th><th>Executive</th><th>Provider</th><th>Outcome / Note</th><th>Time</th>${withDelete && isAdmin() ? "<th>Actions</th>" : ""}</tr></thead><tbody>
+    ${calls
+      .map(
+        (c) => `<tr>
+      <td>${escapeHtml(c.type)}</td>
+      <td>${escapeHtml(c.customerName)}<br>${escapeHtml(c.phone)}</td>
+      <td>${rowStatus(c.status)}</td>
+      <td>${escapeHtml(c.assignedEmployeeName || "-")}</td>
+      <td>${escapeHtml(c.provider || "-")}<br>${escapeHtml(c.providerStatus || "-")}</td>
+      <td>${escapeHtml(c.providerNote || c.outcome || "-")}</td>
+      <td>${new Date(c.createdAt).toLocaleString()}</td>
+      ${withDelete && isAdmin() ? `<td><button class="danger" data-delete-call="${c.id}">Delete</button></td>` : ""}
+    </tr>`
+      )
+      .join("")}
   </tbody></table>`;
 }
 
 function callbacksTable(callbacks) {
   if (!callbacks.length) return "<p>No callbacks pending.</p>";
-  return html`<table><thead><tr><th>Customer</th><th>Reason</th><th>Status</th><th>Created</th></tr></thead><tbody>
-    ${callbacks.map((c) => `<tr><td>${escapeHtml(c.customerName)}</td><td>${escapeHtml(c.reason)}</td><td>${rowStatus(c.status)}</td><td>${new Date(c.createdAt).toLocaleString()}</td></tr>`).join("")}
+  return html`<table><thead><tr><th>Customer</th><th>Reason</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>
+    ${callbacks
+      .map(
+        (c) => `<tr>
+      <td>${escapeHtml(c.customerName)}</td>
+      <td>${escapeHtml(c.reason)}</td>
+      <td>${rowStatus(c.status)}</td>
+      <td>${new Date(c.createdAt).toLocaleString()}</td>
+      <td class="actions">
+        <button class="secondary" data-done-callback="${c.id}">Mark Done</button>
+        ${isAdmin() ? `<button class="danger" data-delete-callback="${c.id}">Delete</button>` : ""}
+      </td>
+    </tr>`
+      )
+      .join("")}
   </tbody></table>`;
-}
-
-function formValues(form) {
-  const data = Object.fromEntries(new FormData(form).entries());
-  const multi = form.querySelector("select[multiple]");
-  if (multi) {
-    data[multi.name] = [...multi.selectedOptions].map((option) => option.value);
-  }
-  if (data.phone) {
-    let phone = String(data.phone).trim().replace(/[\s\-()]/g, "");
-    if (phone.startsWith("00")) phone = `+${phone.slice(2)}`;
-    if (/^0\d{10}$/.test(phone)) phone = `+91${phone.slice(1)}`;
-    if (/^91\d{10}$/.test(phone)) phone = `+${phone}`;
-    if (/^\d{10}$/.test(phone)) phone = `+91${phone}`;
-    if (!phone.startsWith("+")) phone = `+${phone}`;
-    data.phone = phone;
-  }
-  return data;
 }
 
 function bindPageEvents() {
@@ -476,66 +675,112 @@ function bindPageEvents() {
     customerForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const body = formValues(customerForm);
-      const customer = {
-        id: makeLocalId("cus"),
-        name: body.name,
-        phone: body.phone,
-        city: body.city || "",
-        language: body.language || "Hindi",
-        product: body.product || "",
-        status: "new",
-        notes: body.notes || "",
-        optOut: false
-      };
-      state.data.customers.unshift(customer);
+      if (body.id) {
+        const existing = state.data.customers.find((c) => c.id === body.id);
+        if (existing) Object.assign(existing, { name: body.name, phone: body.phone, city: body.city || "", language: body.language || "Hindi", product: body.product || "", notes: body.notes || "" });
+        state.editing.customerId = "";
+      } else {
+        state.data.customers.unshift({
+          id: makeLocalId("cus"),
+          name: body.name,
+          phone: body.phone,
+          city: body.city || "",
+          language: body.language || "Hindi",
+          product: body.product || "",
+          status: "new",
+          notes: body.notes || "",
+          optOut: false
+        });
+      }
       saveLocalData();
       await syncToServer();
       renderApp();
     });
   }
+  document.querySelector("#cancelCustomerEdit")?.addEventListener("click", () => {
+    state.editing.customerId = "";
+    renderApp();
+  });
 
   const employeeForm = document.querySelector("#employeeForm");
   if (employeeForm) {
     employeeForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const body = formValues(employeeForm);
-      const employee = {
-        id: makeLocalId("emp"),
-        name: body.name,
-        phone: body.phone,
-        email: body.email || "",
-        department: body.department || "Sales",
-        language: body.language || "Hindi",
-        availability: body.availability || "free",
-        online: true
-      };
-      state.data.employees.unshift(employee);
+      if (body.id) {
+        const existing = state.data.employees.find((e) => e.id === body.id);
+        if (existing) {
+          Object.assign(existing, {
+            name: body.name,
+            phone: body.phone,
+            email: body.email || "",
+            department: body.department || "Sales",
+            language: body.language || "Hindi",
+            availability: body.availability || "free",
+            online: true
+          });
+        }
+        state.editing.employeeId = "";
+      } else {
+        state.data.employees.unshift({
+          id: makeLocalId("emp"),
+          name: body.name,
+          phone: body.phone,
+          email: body.email || "",
+          department: body.department || "Sales",
+          language: body.language || "Hindi",
+          availability: body.availability || "free",
+          online: true
+        });
+      }
       saveLocalData();
       await syncToServer();
       renderApp();
     });
   }
+  document.querySelector("#cancelEmployeeEdit")?.addEventListener("click", () => {
+    state.editing.employeeId = "";
+    renderApp();
+  });
 
   const campaignForm = document.querySelector("#campaignForm");
   if (campaignForm) {
     campaignForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const body = formValues(campaignForm);
-      const campaign = {
-        id: makeLocalId("cmp"),
-        name: body.name,
-        status: "draft",
-        department: body.department || "Sales",
-        messageTemplate: body.messageTemplate,
-        customerIds: body.customerIds || [],
-        retryLimit: Number(body.retryLimit || 2)
-      };
-      state.data.campaigns.unshift(campaign);
+      if (body.id) {
+        const existing = state.data.campaigns.find((c) => c.id === body.id);
+        if (existing) {
+          Object.assign(existing, {
+            name: body.name,
+            department: body.department || "Sales",
+            status: body.status || "draft",
+            messageTemplate: body.messageTemplate,
+            customerIds: body.customerIds || [],
+            retryLimit: Number(body.retryLimit || 2)
+          });
+        }
+        state.editing.campaignId = "";
+      } else {
+        state.data.campaigns.unshift({
+          id: makeLocalId("cmp"),
+          name: body.name,
+          status: body.status || "draft",
+          department: body.department || "Sales",
+          messageTemplate: body.messageTemplate,
+          customerIds: body.customerIds || [],
+          retryLimit: Number(body.retryLimit || 2)
+        });
+      }
       saveLocalData();
       await syncToServer();
       renderApp();
     });
   }
+  document.querySelector("#cancelCampaignEdit")?.addEventListener("click", () => {
+    state.editing.campaignId = "";
+    renderApp();
+  });
 
   const outboundForm = document.querySelector("#outboundForm");
   if (outboundForm) {
@@ -544,29 +789,25 @@ function bindPageEvents() {
       const body = formValues(outboundForm);
       const customer = state.data.customers.find((item) => item.id === body.customerId);
       const campaign = state.data.campaigns.find((item) => item.id === body.campaignId);
-      if (!customer || !campaign) {
-        alert("Select a valid campaign and customer first.");
-        return;
-      }
+      if (!customer || !campaign) return alert("Select a valid campaign and customer first.");
+      if (customer.optOut) return alert("This customer opted out and cannot be called.");
       await syncToServer();
-      const call = await api("/api/simulate/outbound", {
-        method: "POST",
-        body: JSON.stringify({
-          campaignId: campaign.id,
-          customerId: customer.id,
-          ivrChoice: body.ivrChoice,
-          customer,
-          campaign
-        })
-      });
-      state.data.calls.unshift(call);
-      if (call.outcome === "opt_out") {
-        customer.optOut = true;
-        customer.status = "opt_out";
+      try {
+        const call = await api("/api/simulate/outbound", {
+          method: "POST",
+          body: JSON.stringify({ campaignId: campaign.id, customerId: customer.id, ivrChoice: body.ivrChoice, customer, campaign })
+        });
+        state.data.calls.unshift(call);
+        if (call.outcome === "opt_out") {
+          customer.optOut = true;
+          customer.status = "opt_out";
+        }
+        saveLocalData();
+        await syncToServer();
+        renderApp();
+      } catch (error) {
+        alert(error.message);
       }
-      saveLocalData();
-      await syncToServer();
-      renderApp();
     });
   }
 
@@ -576,16 +817,98 @@ function bindPageEvents() {
       event.preventDefault();
       const body = formValues(incomingForm);
       await syncToServer();
-      const call = await api("/api/simulate/incoming", {
-        method: "POST",
-        body: JSON.stringify(body)
-      });
+      const call = await api("/api/simulate/incoming", { method: "POST", body: JSON.stringify(body) });
       state.data.calls.unshift(call);
       saveLocalData();
       renderApp();
     });
   }
 
+  const settingsForm = document.querySelector("#settingsForm");
+  if (settingsForm) {
+    settingsForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const body = formValues(settingsForm);
+      state.settings = { ...state.settings, ...body };
+      saveSettings();
+      alert("Settings saved.");
+      renderApp();
+    });
+  }
+
+  document.querySelector("#clearCallsBtn")?.addEventListener("click", async () => {
+    if (!confirmDelete("all call history")) return;
+    state.data.calls = [];
+    saveLocalData();
+    await syncToServer();
+    renderApp();
+  });
+  document.querySelector("#clearCallbacksBtn")?.addEventListener("click", async () => {
+    if (!confirmDelete("all callbacks")) return;
+    state.data.callbacks = [];
+    saveLocalData();
+    await syncToServer();
+    renderApp();
+  });
+  document.querySelector("#resetAllBtn")?.addEventListener("click", async () => {
+    if (!window.confirm("Reset ALL CRM data (customers, employees, campaigns, calls, callbacks)?")) return;
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem("auto_calling_crm_data_v1");
+    state.data.customers = [];
+    state.data.employees = [];
+    state.data.campaigns = [];
+    state.data.calls = [];
+    state.data.callbacks = [];
+    saveLocalData();
+    await syncToServer();
+    alert("CRM data cleared. Click Refresh to reload starter sample data from server if needed.");
+    renderApp();
+  });
+
+  document.querySelectorAll("[data-edit-customer]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editing.customerId = button.dataset.editCustomer;
+      state.page = "customers";
+      renderApp();
+    });
+  });
+  document.querySelectorAll("[data-delete-customer]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirmDelete("customer")) return;
+      state.data.customers = state.data.customers.filter((c) => c.id !== button.dataset.deleteCustomer);
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  });
+  document.querySelectorAll("[data-optout-customer]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const customer = state.data.customers.find((c) => c.id === button.dataset.optoutCustomer);
+      if (!customer) return;
+      customer.optOut = !customer.optOut;
+      customer.status = customer.optOut ? "opt_out" : "new";
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-edit-employee]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editing.employeeId = button.dataset.editEmployee;
+      state.page = "employees";
+      renderApp();
+    });
+  });
+  document.querySelectorAll("[data-delete-employee]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirmDelete("employee")) return;
+      state.data.employees = state.data.employees.filter((e) => e.id !== button.dataset.deleteEmployee);
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  });
   document.querySelectorAll("[data-free]").forEach((button) => {
     button.addEventListener("click", async () => {
       const employee = state.data.employees.find((item) => item.id === button.dataset.free);
@@ -597,9 +920,56 @@ function bindPageEvents() {
       renderApp();
     });
   });
+
+  document.querySelectorAll("[data-edit-campaign]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editing.campaignId = button.dataset.editCampaign;
+      state.page = "campaigns";
+      renderApp();
+    });
+  });
+  document.querySelectorAll("[data-delete-campaign]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirmDelete("campaign")) return;
+      state.data.campaigns = state.data.campaigns.filter((c) => c.id !== button.dataset.deleteCampaign);
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-delete-call]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirmDelete("call record")) return;
+      state.data.calls = state.data.calls.filter((c) => c.id !== button.dataset.deleteCall);
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  });
+  document.querySelectorAll("[data-delete-callback]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirmDelete("callback")) return;
+      state.data.callbacks = state.data.callbacks.filter((c) => c.id !== button.dataset.deleteCallback);
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  });
+  document.querySelectorAll("[data-done-callback]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = state.data.callbacks.find((c) => c.id === button.dataset.doneCallback);
+      if (!item) return;
+      item.status = "done";
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  });
 }
 
 async function boot() {
+  state.settings = loadSettings();
   if (!state.token) return renderLogin();
   try {
     const me = await api("/api/me");

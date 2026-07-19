@@ -48,6 +48,17 @@ button.warning {
   color: #111;
 }
 
+button.danger {
+  background: #fee4e2;
+  color: var(--red);
+}
+
+.brand small {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
 .login {
   min-height: 100vh;
   display: grid;

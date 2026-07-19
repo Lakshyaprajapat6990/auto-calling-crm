@@ -6,6 +6,13 @@
       "email": "admin@autocalling.local",
       "password": "admin123",
       "role": "admin"
+    },
+    {
+      "id": "usr_agent",
+      "name": "Agent User",
+      "email": "agent@autocalling.local",
+      "password": "agent123",
+      "role": "agent"
     }
   ],
   "employees": [
