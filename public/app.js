@@ -1,4 +1,5 @@
 const app = document.querySelector("#app");
+const STORAGE_KEY = "auto_calling_crm_data_v1";
 
 const state = {
   token: localStorage.getItem("token") || "",
@@ -27,6 +28,67 @@ const pages = [
   ["reports", "Reports"]
 ];
 
+function makeLocalId(prefix) {
+  return `${prefix}_${Math.random().toString(16).slice(2, 12)}`;
+}
+
+function computeAnalytics(data) {
+  const calls = data.calls || [];
+  const callbacks = data.callbacks || [];
+  const employees = data.employees || [];
+  return {
+    totalCustomers: (data.customers || []).length,
+    totalEmployees: employees.length,
+    totalCampaigns: (data.campaigns || []).length,
+    totalCalls: calls.length,
+    transferred: calls.filter((call) => call.status === "transferred").length,
+    callbacks: callbacks.filter((callback) => callback.status === "pending").length,
+    freeEmployees: employees.filter((employee) => employee.online && employee.availability === "free").length
+  };
+}
+
+function loadLocalData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function saveLocalData() {
+  const payload = {
+    employees: state.data.employees || [],
+    customers: state.data.customers || [],
+    campaigns: state.data.campaigns || [],
+    calls: state.data.calls || [],
+    callbacks: state.data.callbacks || []
+  };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  state.data.analytics = computeAnalytics(state.data);
+}
+
+async function syncToServer() {
+  if (!state.token) return;
+  try {
+    await api("/api/db/sync", {
+      method: "POST",
+      body: JSON.stringify({
+        db: {
+          employees: state.data.employees,
+          customers: state.data.customers,
+          campaigns: state.data.campaigns,
+          calls: state.data.calls,
+          callbacks: state.data.callbacks
+        }
+      })
+    });
+  } catch {
+    // Keep local data even if server sync fails on a cold instance.
+  }
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -42,16 +104,34 @@ async function api(path, options = {}) {
 }
 
 async function refresh() {
-  const [analytics, employees, customers, campaigns, calls, callbacks, telephony] = await Promise.all([
-    api("/api/analytics"),
+  const telephony = await api("/api/telephony/config");
+  const local = loadLocalData();
+  if (local) {
+    state.data = {
+      ...state.data,
+      employees: local.employees || [],
+      customers: local.customers || [],
+      campaigns: local.campaigns || [],
+      calls: local.calls || [],
+      callbacks: local.callbacks || [],
+      telephony,
+      analytics: {}
+    };
+    state.data.analytics = computeAnalytics(state.data);
+    await syncToServer();
+    return;
+  }
+
+  const [employees, customers, campaigns, calls, callbacks] = await Promise.all([
     api("/api/employees"),
     api("/api/customers"),
     api("/api/campaigns"),
     api("/api/calls"),
-    api("/api/callbacks"),
-    api("/api/telephony/config")
+    api("/api/callbacks")
   ]);
-  state.data = { analytics, employees, customers, campaigns, calls, callbacks, telephony };
+  state.data = { analytics: {}, employees, customers, campaigns, calls, callbacks, telephony };
+  state.data.analytics = computeAnalytics(state.data);
+  saveLocalData();
 }
 
 function html(strings, ...values) {
@@ -191,7 +271,7 @@ function renderCustomers() {
           <label>Notes <input name="notes"></label>
           <button type="submit">Add Customer</button>
         </form>
-        <p class="message">Tip: save phone as +91XXXXXXXXXX (example +918602842351). If you type 0860..., it will auto-convert to +91860...</p>
+        <p class="message">Tip: save phone as +91XXXXXXXXXX. Your customers are saved in this browser, so Refresh will not clear them.</p>
       </div>
     </div>
     <div class="panel"><h2>Customers</h2><div class="panel-body">${customersTable(state.data.customers)}</div></div>
@@ -391,25 +471,129 @@ function formValues(form) {
 }
 
 function bindPageEvents() {
-  const bindForm = (id, path) => {
-    const form = document.querySelector(id);
-    if (!form) return;
-    form.addEventListener("submit", async (event) => {
+  const customerForm = document.querySelector("#customerForm");
+  if (customerForm) {
+    customerForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      await api(path, { method: "POST", body: JSON.stringify(formValues(form)) });
-      await refresh();
+      const body = formValues(customerForm);
+      const customer = {
+        id: makeLocalId("cus"),
+        name: body.name,
+        phone: body.phone,
+        city: body.city || "",
+        language: body.language || "Hindi",
+        product: body.product || "",
+        status: "new",
+        notes: body.notes || "",
+        optOut: false
+      };
+      state.data.customers.unshift(customer);
+      saveLocalData();
+      await syncToServer();
       renderApp();
     });
-  };
-  bindForm("#customerForm", "/api/customers");
-  bindForm("#employeeForm", "/api/employees");
-  bindForm("#campaignForm", "/api/campaigns");
-  bindForm("#outboundForm", "/api/simulate/outbound");
-  bindForm("#incomingForm", "/api/simulate/incoming");
+  }
+
+  const employeeForm = document.querySelector("#employeeForm");
+  if (employeeForm) {
+    employeeForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = formValues(employeeForm);
+      const employee = {
+        id: makeLocalId("emp"),
+        name: body.name,
+        phone: body.phone,
+        email: body.email || "",
+        department: body.department || "Sales",
+        language: body.language || "Hindi",
+        availability: body.availability || "free",
+        online: true
+      };
+      state.data.employees.unshift(employee);
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  }
+
+  const campaignForm = document.querySelector("#campaignForm");
+  if (campaignForm) {
+    campaignForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = formValues(campaignForm);
+      const campaign = {
+        id: makeLocalId("cmp"),
+        name: body.name,
+        status: "draft",
+        department: body.department || "Sales",
+        messageTemplate: body.messageTemplate,
+        customerIds: body.customerIds || [],
+        retryLimit: Number(body.retryLimit || 2)
+      };
+      state.data.campaigns.unshift(campaign);
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  }
+
+  const outboundForm = document.querySelector("#outboundForm");
+  if (outboundForm) {
+    outboundForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = formValues(outboundForm);
+      const customer = state.data.customers.find((item) => item.id === body.customerId);
+      const campaign = state.data.campaigns.find((item) => item.id === body.campaignId);
+      if (!customer || !campaign) {
+        alert("Select a valid campaign and customer first.");
+        return;
+      }
+      await syncToServer();
+      const call = await api("/api/simulate/outbound", {
+        method: "POST",
+        body: JSON.stringify({
+          campaignId: campaign.id,
+          customerId: customer.id,
+          ivrChoice: body.ivrChoice,
+          customer,
+          campaign
+        })
+      });
+      state.data.calls.unshift(call);
+      if (call.outcome === "opt_out") {
+        customer.optOut = true;
+        customer.status = "opt_out";
+      }
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  }
+
+  const incomingForm = document.querySelector("#incomingForm");
+  if (incomingForm) {
+    incomingForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = formValues(incomingForm);
+      await syncToServer();
+      const call = await api("/api/simulate/incoming", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      state.data.calls.unshift(call);
+      saveLocalData();
+      renderApp();
+    });
+  }
+
   document.querySelectorAll("[data-free]").forEach((button) => {
     button.addEventListener("click", async () => {
-      await api(`/api/employees/${button.dataset.free}/free`, { method: "POST" });
-      await refresh();
+      const employee = state.data.employees.find((item) => item.id === button.dataset.free);
+      if (!employee) return;
+      employee.availability = "free";
+      employee.online = true;
+      saveLocalData();
+      await syncToServer();
       renderApp();
     });
   });

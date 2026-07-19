@@ -9,6 +9,7 @@ const {
   buildIncomingTwiml,
   buildIvrResultTwiml
 } = require("./telephony");
+const { readDb, writeDb, replaceDb } = require("./db");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -36,36 +37,9 @@ function loadEnvFile() {
 loadEnvFile();
 
 const PUBLIC_DIR = path.join(ROOT, "public");
-const DATA_DIR = process.env.VERCEL
-  ? path.join("/tmp", "auto-calling-data")
-  : path.join(ROOT, "data");
-const DB_PATH = path.join(DATA_DIR, "db.json");
-const SEED_PATH = path.join(ROOT, "data", "seed.json");
 const PORT = Number(process.env.PORT || 3001);
 const AUTH_SECRET = process.env.AUTH_SECRET || "auto-calling-crm-dev-secret";
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-function ensureDb() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DB_PATH)) {
-    fs.writeFileSync(DB_PATH, fs.readFileSync(SEED_PATH, "utf8"));
-    return;
-  }
-  const current = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
-  const hasData = Object.values(current).some((value) => Array.isArray(value) && value.length > 0);
-  if (!hasData) {
-    fs.writeFileSync(DB_PATH, fs.readFileSync(SEED_PATH, "utf8"));
-  }
-}
-
-function readDb() {
-  ensureDb();
-  return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
-}
-
-function writeDb(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-}
 
 function sendJson(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -197,14 +171,26 @@ function createCallback(db, customer, campaign, reason) {
   return callback;
 }
 
-async function simulateOutboundCall(db, campaignId, customerId, ivrChoice = "1") {
-  const campaign = db.campaigns.find((item) => item.id === campaignId);
-  const customer = db.customers.find((item) => item.id === customerId);
+async function simulateOutboundCall(db, campaignId, customerId, ivrChoice = "1", overrides = {}) {
+  const campaign =
+    overrides.campaign ||
+    db.campaigns.find((item) => item.id === campaignId);
+  const customer =
+    overrides.customer ||
+    db.customers.find((item) => item.id === customerId);
   if (!campaign || !customer) {
     return { error: "Campaign or customer not found" };
   }
   if (customer.optOut) {
     return { error: "Customer has opted out" };
+  }
+
+  // Ensure records exist in server db for webhook updates
+  if (!db.customers.some((item) => item.id === customer.id)) {
+    db.customers.unshift(customer);
+  }
+  if (!db.campaigns.some((item) => item.id === campaign.id)) {
+    db.campaigns.unshift(campaign);
   }
 
   const live = (process.env.CALL_MODE || "simulation") === "live";
@@ -475,6 +461,25 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
   const user = requireUser(req, res);
   if (!user) return;
 
+  if (req.method === "POST" && pathname === "/api/db/sync") {
+    const body = await parseBody(req);
+    const synced = replaceDb(body.db || body);
+    return sendJson(res, 200, {
+      ok: true,
+      counts: {
+        customers: synced.customers.length,
+        employees: synced.employees.length,
+        campaigns: synced.campaigns.length,
+        calls: synced.calls.length,
+        callbacks: synced.callbacks.length
+      }
+    });
+  }
+
+  if (req.method === "GET" && pathname === "/api/db/export") {
+    return sendJson(res, 200, db);
+  }
+
   if (req.method === "GET" && pathname === "/api/me") return sendJson(res, 200, { user });
   if (req.method === "GET" && pathname === "/api/analytics") return sendJson(res, 200, analytics(db));
   if (req.method === "GET" && pathname === "/api/employees") return sendJson(res, 200, db.employees);
@@ -537,7 +542,10 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
 
   if (req.method === "POST" && pathname === "/api/simulate/outbound") {
     const body = await parseBody(req);
-    const result = await simulateOutboundCall(db, body.campaignId, body.customerId, body.ivrChoice);
+    const result = await simulateOutboundCall(db, body.campaignId, body.customerId, body.ivrChoice, {
+      customer: body.customer,
+      campaign: body.campaign
+    });
     if (result.error) return sendJson(res, 400, result);
     writeDb(db);
     return sendJson(res, 201, result.call);
@@ -598,7 +606,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-ensureDb();
+readDb();
 
 if (!process.env.VERCEL) {
   server.listen(PORT, () => {
