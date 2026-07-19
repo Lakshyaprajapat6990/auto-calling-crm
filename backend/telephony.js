@@ -136,6 +136,10 @@ async function startOutboundCall({ customer, campaign, call }) {
     return startTwilioCall({ config, customer, campaign, call });
   }
 
+  if (config.provider === "exotel") {
+    return startExotelCall({ config, customer, call });
+  }
+
   return {
     provider: config.provider,
     providerCallId: null,
@@ -179,6 +183,82 @@ async function startTwilioCall({ config, customer, call }) {
   } catch (error) {
     return {
       provider: "twilio",
+      providerCallId: null,
+      status: "failed",
+      note: error.message
+    };
+  }
+}
+
+async function startExotelCall({ config, customer, call }) {
+  const required = ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOTEL_CALLER_ID"];
+  const missing = required.filter((key) => !process.env[key]);
+  if (missing.length) {
+    return {
+      provider: "exotel",
+      providerCallId: null,
+      status: "missing_credentials",
+      note: `Missing ${missing.join(", ")}`
+    };
+  }
+
+  const subdomain = process.env.EXOTEL_SUBDOMAIN || "api.exotel.com";
+  const twimlUrl = `${config.publicBaseUrl}/api/telephony/ivr?callId=${encodeURIComponent(call.id)}&mode=outbound`;
+  const auth = Buffer.from(`${process.env.EXOTEL_API_KEY}:${process.env.EXOTEL_API_TOKEN}`).toString("base64");
+  const body = new URLSearchParams({
+    From: process.env.EXOTEL_CALLER_ID,
+    To: customer.phone,
+    CallerId: process.env.EXOTEL_CALLER_ID,
+    Url: twimlUrl,
+    CallType: "trans"
+  }).toString();
+
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: subdomain,
+          path: `/v1/Accounts/${process.env.EXOTEL_ACCOUNT_SID}/Calls/connect.json`,
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${auth}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": Buffer.byteLength(body)
+          }
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => {
+            data += chunk;
+          });
+          res.on("end", () => {
+            let parsed = {};
+            try {
+              parsed = JSON.parse(data);
+            } catch {
+              parsed = { raw: data };
+            }
+            if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
+            else reject(new Error(parsed.RestException?.Message || parsed.message || parsed.raw || `Exotel error ${res.statusCode}`));
+          });
+        }
+      );
+      req.on("error", reject);
+      req.write(body);
+      req.end();
+    });
+
+    const callData = result.Call || result;
+    return {
+      provider: "exotel",
+      providerCallId: callData.Sid || callData.sid || null,
+      status: callData.Status || callData.status || "queued",
+      note: `Live Exotel call started to ${customer.phone}`,
+      webhookUrl: twimlUrl
+    };
+  } catch (error) {
+    return {
+      provider: "exotel",
       providerCallId: null,
       status: "failed",
       note: error.message

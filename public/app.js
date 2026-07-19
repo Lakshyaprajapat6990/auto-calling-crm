@@ -1,6 +1,17 @@
 const app = document.querySelector("#app");
-const STORAGE_KEY = "auto_calling_crm_data_v2";
+const STORAGE_KEY = "auto_calling_crm_data_v3";
 const SETTINGS_KEY = "auto_calling_crm_settings_v1";
+
+const DISPOSITIONS = [
+  "interested",
+  "not_interested",
+  "callback",
+  "busy",
+  "no_answer",
+  "wrong_number",
+  "opt_out",
+  "connected"
+];
 
 const defaultSettings = () => ({
   companyName: "Auto Calling CRM",
@@ -25,6 +36,7 @@ const state = {
     campaigns: [],
     calls: [],
     callbacks: [],
+    dnc: [],
     telephony: {}
   }
 };
@@ -37,6 +49,7 @@ const allPages = [
   ["outbound", "Outbound Calls", "all"],
   ["incoming", "Incoming Calls", "all"],
   ["callbacks", "Callbacks", "all"],
+  ["dnc", "DND List", "admin"],
   ["reports", "Reports", "all"],
   ["telephony", "Calling Setup", "admin"],
   ["settings", "Settings", "admin"]
@@ -89,7 +102,7 @@ function loadLocalData() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      const legacy = localStorage.getItem("auto_calling_crm_data_v1");
+      const legacy = localStorage.getItem("auto_calling_crm_data_v2") || localStorage.getItem("auto_calling_crm_data_v1");
       return legacy ? JSON.parse(legacy) : null;
     }
     return JSON.parse(raw);
@@ -104,7 +117,8 @@ function saveLocalData() {
     customers: state.data.customers || [],
     campaigns: state.data.campaigns || [],
     calls: state.data.calls || [],
-    callbacks: state.data.callbacks || []
+    callbacks: state.data.callbacks || [],
+    dnc: state.data.dnc || []
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   state.data.analytics = computeAnalytics(state.data);
@@ -113,7 +127,7 @@ function saveLocalData() {
 async function syncToServer() {
   if (!state.token) return;
   try {
-    await api("/api/db/sync", {
+    const result = await api("/api/db/sync", {
       method: "POST",
       body: JSON.stringify({
         db: {
@@ -121,10 +135,15 @@ async function syncToServer() {
           customers: state.data.customers,
           campaigns: state.data.campaigns,
           calls: state.data.calls,
-          callbacks: state.data.callbacks
+          callbacks: state.data.callbacks,
+          dnc: state.data.dnc || [],
+          settings: state.settings
         }
       })
     });
+    if (result.settings) state.settings = { ...state.settings, ...result.settings };
+    if (Array.isArray(result.dnc)) state.data.dnc = result.dnc;
+    state.storageMode = result.storage || state.storageMode;
   } catch {
     // Keep local data even if server sync fails.
   }
@@ -155,6 +174,7 @@ async function refresh() {
       campaigns: local.campaigns || [],
       calls: local.calls || [],
       callbacks: local.callbacks || [],
+      dnc: local.dnc || [],
       telephony,
       analytics: {}
     };
@@ -304,6 +324,7 @@ function renderPage() {
     incoming: renderIncoming,
     telephony: renderTelephony,
     callbacks: renderCallbacks,
+    dnc: renderDnc,
     reports: renderReports,
     settings: renderSettings
   }[state.page]();
@@ -311,6 +332,8 @@ function renderPage() {
 
 function renderDashboard() {
   const a = state.data.analytics;
+  const free = state.data.employees.filter((e) => e.online !== false && e.availability === "free");
+  const busy = state.data.employees.filter((e) => e.availability === "busy");
   return html`
     <div class="grid">
       <div class="card">Customers<strong>${a.totalCustomers || 0}</strong></div>
@@ -324,9 +347,16 @@ function renderDashboard() {
       <div class="card">Failed<strong>${a.failed || 0}</strong></div>
       <div class="card">Opted out<strong>${a.optedOut || 0}</strong></div>
     </div>
+    <div class="panel">
+      <h2>Agent Live Board</h2>
+      <div class="panel-body">
+        <p class="message">Free: ${free.length} · Busy: ${busy.length} · DND numbers: ${(state.data.dnc || []).length}</p>
+        ${employeesTable(state.data.employees, true)}
+      </div>
+    </div>
     <div class="split">
       <div class="panel"><h2>Recent Calls</h2><div class="panel-body">${callsTable(state.data.calls.slice(0, 5), true)}</div></div>
-      <div class="panel"><h2>Employee Availability</h2><div class="panel-body">${employeesTable(state.data.employees)}</div></div>
+      <div class="panel"><h2>Storage</h2><div class="panel-body"><p class="message">Mode: ${escapeHtml(state.storageMode || "browser+server sync")}. For multi-user production, connect Postgres (see Settings).</p></div></div>
     </div>
   `;
 }
@@ -348,7 +378,14 @@ function renderCustomers() {
           <button type="submit">${editing ? "Update Customer" : "Add Customer"}</button>
           ${editing ? `<button type="button" class="secondary" id="cancelCustomerEdit">Cancel</button>` : ""}
         </form>
-        <p class="message">Use international format (+91...). Opt-out customers are blocked from outbound calls.</p>
+        <p class="message">Use international format (+91...). Opt-out / DND customers are blocked from outbound calls.</p>
+        <div class="actions" style="margin-top:12px">
+          <label class="secondary" style="padding:10px 14px;border-radius:6px;background:#eef2f6;cursor:pointer">
+            Import CSV
+            <input id="csvImportInput" type="file" accept=".csv,text/csv" hidden>
+          </label>
+          <a class="message" href="/customers-sample.csv" style="align-self:center">Download sample CSV</a>
+        </div>
       </div>
     </div>
     <div class="panel"><h2>Customers</h2><div class="panel-body">${customersTable(state.data.customers)}</div></div>
@@ -422,7 +459,7 @@ function renderOutbound() {
     <div class="panel">
       <h2>Start Outbound Call</h2>
       <div class="panel-body">
-        <p class="message">Live mode uses your telephony provider. Twilio trial can call only verified numbers.</p>
+        <p class="message">Single call or queue auto-dial (next eligible customer in campaign). Calling hours and DND are enforced.</p>
         ${latestNote}
         <form id="outboundForm" class="form-grid">
           <label>Campaign <select name="campaignId">${campaignOptions}</select></label>
@@ -436,10 +473,28 @@ function renderOutbound() {
             </select>
           </label>
           <button type="submit">Start Call</button>
+          <button type="button" class="secondary" id="dialNextBtn">Dial Next In Queue</button>
         </form>
       </div>
     </div>
     <div class="panel"><h2>Call History</h2><div class="panel-body">${callsTable(state.data.calls, true)}</div></div>
+  `;
+}
+
+function renderDnc() {
+  return html`
+    <div class="panel">
+      <h2>Add DND / Do-Not-Call Number</h2>
+      <div class="panel-body">
+        <form id="dncForm" class="form-grid">
+          <label>Phone <input name="phone" type="tel" placeholder="+91XXXXXXXXXX" required></label>
+          <label>Reason <input name="reason" placeholder="Customer request / DND registry"></label>
+          <button type="submit">Add to DND</button>
+        </form>
+        <p class="message">Numbers on this list cannot be dialed. Opt-out dispositions are also added here automatically.</p>
+      </div>
+    </div>
+    <div class="panel"><h2>DND List</h2><div class="panel-body">${dncTable(state.data.dnc || [])}</div></div>
   `;
 }
 
@@ -530,14 +585,30 @@ function renderSettings() {
           <label>Calling Hours Start <input name="callingHoursStart" type="time" value="${escapeHtml(s.callingHoursStart)}"></label>
           <label>Calling Hours End <input name="callingHoursEnd" type="time" value="${escapeHtml(s.callingHoursEnd)}"></label>
           <label>Default Language <select name="defaultLanguage"><option ${s.defaultLanguage === "Hindi" ? "selected" : ""}>Hindi</option><option ${s.defaultLanguage === "English" ? "selected" : ""}>English</option></select></label>
+          <label>Enforce Calling Hours
+            <select name="enforceCallingHours">
+              <option value="true" ${s.enforceCallingHours !== false ? "selected" : ""}>Yes - block calls outside hours</option>
+              <option value="false" ${s.enforceCallingHours === false ? "selected" : ""}>No</option>
+            </select>
+          </label>
           <button type="submit">Save Settings</button>
+        </form>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Change Password</h2>
+      <div class="panel-body">
+        <form id="passwordForm" class="form-grid">
+          <label>Current Password <input name="currentPassword" type="password" required></label>
+          <label>New Password <input name="newPassword" type="password" minlength="6" required></label>
+          <button type="submit">Update Password</button>
         </form>
       </div>
     </div>
     <div class="panel">
       <h2>Data Management</h2>
       <div class="panel-body">
-        <p class="message">Use these tools before handing the system to a client, or when cleaning demo data.</p>
+        <p class="message">Storage: ${escapeHtml(state.storageMode || "browser+server sync")}. For company sale, connect a real Postgres database (Neon free tier) using DATABASE_URL.</p>
         <div class="actions">
           <button class="secondary" id="clearCallsBtn">Clear Call History</button>
           <button class="secondary" id="clearCallbacksBtn">Clear Callbacks</button>
@@ -631,18 +702,41 @@ function campaignsTable(campaigns) {
 
 function callsTable(calls, withDelete = false) {
   if (!calls.length) return "<p>No calls yet.</p>";
-  return html`<table><thead><tr><th>Type</th><th>Customer</th><th>Status</th><th>Executive</th><th>Provider</th><th>Outcome / Note</th><th>Time</th>${withDelete && isAdmin() ? "<th>Actions</th>" : ""}</tr></thead><tbody>
+  return html`<table><thead><tr><th>Type</th><th>Customer</th><th>Status</th><th>Disposition</th><th>Recording</th><th>Outcome / Note</th><th>Time</th><th>Actions</th></tr></thead><tbody>
     ${calls
       .map(
         (c) => `<tr>
       <td>${escapeHtml(c.type)}</td>
       <td>${escapeHtml(c.customerName)}<br>${escapeHtml(c.phone)}</td>
       <td>${rowStatus(c.status)}</td>
-      <td>${escapeHtml(c.assignedEmployeeName || "-")}</td>
-      <td>${escapeHtml(c.provider || "-")}<br>${escapeHtml(c.providerStatus || "-")}</td>
+      <td>
+        <select data-disposition-call="${c.id}">
+          <option value="">Set disposition</option>
+          ${DISPOSITIONS.map((d) => `<option value="${d}" ${c.disposition === d ? "selected" : ""}>${d}</option>`).join("")}
+        </select>
+      </td>
+      <td>${c.recordingUrl ? `<a href="${escapeHtml(c.recordingUrl)}" target="_blank" rel="noreferrer">Play</a>` : "-"}</td>
       <td>${escapeHtml(c.providerNote || c.outcome || "-")}</td>
       <td>${new Date(c.createdAt).toLocaleString()}</td>
-      ${withDelete && isAdmin() ? `<td><button class="danger" data-delete-call="${c.id}">Delete</button></td>` : ""}
+      <td class="actions">
+        ${withDelete && isAdmin() ? `<button class="danger" data-delete-call="${c.id}">Delete</button>` : ""}
+      </td>
+    </tr>`
+      )
+      .join("")}
+  </tbody></table>`;
+}
+
+function dncTable(rows) {
+  if (!rows.length) return "<p>No DND numbers yet.</p>";
+  return html`<table><thead><tr><th>Phone</th><th>Reason</th><th>Added</th><th>Actions</th></tr></thead><tbody>
+    ${rows
+      .map(
+        (row) => `<tr>
+      <td>${escapeHtml(row.phone)}</td>
+      <td>${escapeHtml(row.reason || "-")}</td>
+      <td>${row.createdAt ? new Date(row.createdAt).toLocaleString() : "-"}</td>
+      <td>${isAdmin() ? `<button class="danger" data-delete-dnc="${row.id}">Delete</button>` : ""}</td>
     </tr>`
       )
       .join("")}
@@ -826,15 +920,145 @@ function bindPageEvents() {
 
   const settingsForm = document.querySelector("#settingsForm");
   if (settingsForm) {
-    settingsForm.addEventListener("submit", (event) => {
+    settingsForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const body = formValues(settingsForm);
+      body.enforceCallingHours = String(body.enforceCallingHours) !== "false";
       state.settings = { ...state.settings, ...body };
       saveSettings();
+      try {
+        await api("/api/settings", { method: "PUT", body: JSON.stringify(state.settings) });
+      } catch {
+        // local settings still saved
+      }
+      await syncToServer();
       alert("Settings saved.");
       renderApp();
     });
   }
+
+  const passwordForm = document.querySelector("#passwordForm");
+  if (passwordForm) {
+    passwordForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = formValues(passwordForm);
+      try {
+        await api("/api/password/change", { method: "POST", body: JSON.stringify(body) });
+        alert("Password updated.");
+        passwordForm.reset();
+      } catch (error) {
+        alert(error.message);
+      }
+    });
+  }
+
+  const dncForm = document.querySelector("#dncForm");
+  if (dncForm) {
+    dncForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = formValues(dncForm);
+      state.data.dnc = state.data.dnc || [];
+      if (!state.data.dnc.some((item) => item.phone === body.phone)) {
+        state.data.dnc.unshift({
+          id: makeLocalId("dnc"),
+          phone: body.phone,
+          reason: body.reason || "manual",
+          createdAt: new Date().toISOString()
+        });
+      }
+      const customer = state.data.customers.find((c) => c.phone === body.phone);
+      if (customer) {
+        customer.optOut = true;
+        customer.status = "opt_out";
+      }
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  }
+
+  document.querySelector("#dialNextBtn")?.addEventListener("click", async () => {
+    const outboundForm = document.querySelector("#outboundForm");
+    if (!outboundForm) return;
+    const body = formValues(outboundForm);
+    const campaign = state.data.campaigns.find((item) => item.id === body.campaignId);
+    if (!campaign) return alert("Select a campaign first.");
+    await syncToServer();
+    try {
+      const result = await api("/api/campaigns/dial-next", {
+        method: "POST",
+        body: JSON.stringify({ campaignId: campaign.id, campaign, ivrChoice: body.ivrChoice })
+      });
+      state.data.calls.unshift(result.call);
+      saveLocalData();
+      await syncToServer();
+      alert(`Queued/started call. Remaining in queue estimate: ${result.remaining}`);
+      renderApp();
+    } catch (error) {
+      alert(error.message);
+    }
+  });
+
+  document.querySelector("#csvImportInput")?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    try {
+      const result = await api("/api/customers/import", {
+        method: "POST",
+        body: JSON.stringify({ csv: text })
+      });
+      for (const customer of result.customers || []) {
+        if (!state.data.customers.some((c) => c.id === customer.id || c.phone === customer.phone)) {
+          state.data.customers.unshift(customer);
+        }
+      }
+      saveLocalData();
+      await syncToServer();
+      alert(`Imported ${result.imported} customers.`);
+      renderApp();
+    } catch (error) {
+      alert(error.message);
+    }
+  });
+
+  document.querySelectorAll("[data-disposition-call]").forEach((select) => {
+    select.addEventListener("change", async () => {
+      const callId = select.dataset.dispositionCall;
+      const disposition = select.value;
+      if (!disposition) return;
+      const call = state.data.calls.find((c) => c.id === callId);
+      if (call) call.disposition = disposition;
+      if (disposition === "opt_out" && call) {
+        const customer = state.data.customers.find((c) => c.id === call.customerId);
+        if (customer) {
+          customer.optOut = true;
+          customer.status = "opt_out";
+        }
+      }
+      saveLocalData();
+      try {
+        await api(`/api/calls/${callId}/disposition`, {
+          method: "POST",
+          body: JSON.stringify({ disposition })
+        });
+      } catch {
+        // keep local
+      }
+      await syncToServer();
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-delete-dnc]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirmDelete("DND number")) return;
+      state.data.dnc = (state.data.dnc || []).filter((item) => item.id !== button.dataset.deleteDnc);
+      saveLocalData();
+      await syncToServer();
+      renderApp();
+    });
+  });
 
   document.querySelector("#clearCallsBtn")?.addEventListener("click", async () => {
     if (!confirmDelete("all call history")) return;

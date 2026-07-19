@@ -9,7 +9,16 @@ const {
   buildIncomingTwiml,
   buildIvrResultTwiml
 } = require("./telephony");
-const { readDb, writeDb, replaceDb } = require("./db");
+const { readStore: readDb, writeStore: writeDb, replaceStore: replaceDb } = require("./store");
+const {
+  hashPassword,
+  verifyPassword,
+  normalizePhone,
+  parseCsv,
+  isWithinCallingHours,
+  isDncBlocked,
+  DISPOSITIONS
+} = require("./business");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -131,17 +140,6 @@ function makeId(prefix) {
   return `${prefix}_${crypto.randomBytes(5).toString("hex")}`;
 }
 
-function normalizePhone(value) {
-  let phone = String(value || "").trim().replace(/[\s\-()]/g, "");
-  if (!phone) return "";
-  if (phone.startsWith("00")) phone = `+${phone.slice(2)}`;
-  if (/^0\d{10}$/.test(phone)) phone = `+91${phone.slice(1)}`;
-  if (/^91\d{10}$/.test(phone)) phone = `+${phone}`;
-  if (/^\d{10}$/.test(phone)) phone = `+91${phone}`;
-  if (!phone.startsWith("+")) phone = `+${phone}`;
-  return phone;
-}
-
 function renderTemplate(template, customer) {
   const company = process.env.COMPANY_NAME || "Auto Calling CRM";
   return template.replace(/\{\{(\w+)\}\}/g, (_, key) => {
@@ -185,6 +183,14 @@ async function simulateOutboundCall(db, campaignId, customerId, ivrChoice = "1",
   if (customer.optOut) {
     return { error: "Customer has opted out" };
   }
+  if (isDncBlocked(db, customer.phone)) {
+    return { error: "Number is on DND / Do-Not-Call list" };
+  }
+  if (db.settings?.enforceCallingHours !== false && !isWithinCallingHours(db.settings)) {
+    return {
+      error: `Outside calling hours (${db.settings.callingHoursStart || "09:00"}-${db.settings.callingHoursEnd || "19:00"})`
+    };
+  }
 
   // Ensure records exist in server db for webhook updates
   if (!db.customers.some((item) => item.id === customer.id)) {
@@ -198,8 +204,8 @@ async function simulateOutboundCall(db, campaignId, customerId, ivrChoice = "1",
   const call = {
     id: makeId("call"),
     type: "outbound",
-    campaignId,
-    customerId,
+    campaignId: campaign.id,
+    customerId: customer.id,
     customerName: customer.name,
     phone: customer.phone,
     message: renderTemplate(campaign.messageTemplate, customer),
@@ -208,9 +214,11 @@ async function simulateOutboundCall(db, campaignId, customerId, ivrChoice = "1",
     assignedEmployeeId: null,
     assignedEmployeeName: null,
     outcome: null,
+    disposition: null,
     provider: "simulation",
     providerCallId: null,
     providerStatus: null,
+    recordingUrl: null,
     createdAt: new Date().toISOString()
   };
 
@@ -326,8 +334,14 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
 
   if (req.method === "POST" && pathname === "/api/login") {
     const body = await parseBody(req);
-    const user = db.users.find((item) => item.email === body.email && item.password === body.password);
-    if (!user) return sendJson(res, 401, { error: "Invalid email or password" });
+    const user = db.users.find((item) => item.email === body.email);
+    if (!user || !verifyPassword(body.password, user.password)) {
+      return sendJson(res, 401, { error: "Invalid email or password" });
+    }
+    if (!String(user.password).includes(":")) {
+      user.password = hashPassword(body.password);
+      writeDb(db);
+    }
     const safeUser = { id: user.id, name: user.name, email: user.email, role: user.role };
     const token = signToken(safeUser);
     return sendJson(res, 200, { token, user: safeUser });
@@ -455,6 +469,8 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
       createdAt: new Date().toISOString()
     };
     db.recordings.unshift(recording);
+    const existing = db.calls.find((item) => item.providerCallId === recording.providerCallId || item.id === recording.callId);
+    if (existing && recording.url) existing.recordingUrl = recording.url;
     writeDb(db);
     return sendJson(res, 201, recording);
   }
@@ -472,8 +488,12 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
         employees: synced.employees.length,
         campaigns: synced.campaigns.length,
         calls: synced.calls.length,
-        callbacks: synced.callbacks.length
-      }
+        callbacks: synced.callbacks.length,
+        dnc: (synced.dnc || []).length
+      },
+      settings: synced.settings,
+      dnc: synced.dnc || [],
+      storage: process.env.DATABASE_URL ? "postgres" : process.env.VERCEL ? "serverless-memory+browser" : "local-file+browser"
     });
   }
 
@@ -550,6 +570,176 @@ async function handleApi(req, res, pathname, searchParams = new URLSearchParams(
     if (result.error) return sendJson(res, 400, result);
     writeDb(db);
     return sendJson(res, 201, result.call);
+  }
+
+  if (req.method === "POST" && pathname === "/api/campaigns/dial-next") {
+    const body = await parseBody(req);
+    const campaign = body.campaign || db.campaigns.find((item) => item.id === body.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
+    const customerIds = campaign.customerIds || [];
+    const called = new Set(
+      db.calls
+        .filter((call) => call.campaignId === campaign.id && call.status !== "failed")
+        .map((call) => call.customerId)
+    );
+    const nextCustomer =
+      body.customer ||
+      db.customers.find(
+        (customer) =>
+          customerIds.includes(customer.id) &&
+          !customer.optOut &&
+          !isDncBlocked(db, customer.phone) &&
+          !called.has(customer.id)
+      );
+    if (!nextCustomer) return sendJson(res, 404, { error: "No eligible customers left in campaign queue" });
+    const result = await simulateOutboundCall(db, campaign.id, nextCustomer.id, body.ivrChoice || "1", {
+      customer: nextCustomer,
+      campaign
+    });
+    if (result.error) return sendJson(res, 400, result);
+    writeDb(db);
+    const remaining = customerIds.filter((id) => {
+      const customer = db.customers.find((item) => item.id === id);
+      return customer && !customer.optOut && !isDncBlocked(db, customer.phone) && !called.has(id) && id !== nextCustomer.id;
+    }).length;
+    return sendJson(res, 201, { call: result.call, remaining });
+  }
+
+  if (req.method === "POST" && pathname === "/api/customers/import") {
+    const body = await parseBody(req);
+    const rows = Array.isArray(body.rows) ? body.rows : parseCsv(body.csv || "");
+    const imported = [];
+    for (const row of rows) {
+      const name = row.name || row.Name || row.customer || "";
+      const phone = normalizePhone(row.phone || row.Phone || row.mobile || row.Mobile || "");
+      if (!name || !phone) continue;
+      if (isDncBlocked(db, phone)) continue;
+      if (db.customers.some((item) => normalizePhone(item.phone) === phone)) continue;
+      const customer = {
+        id: makeId("cus"),
+        name,
+        phone,
+        city: row.city || row.City || "",
+        language: row.language || row.Language || db.settings.defaultLanguage || "Hindi",
+        product: row.product || row.Product || "",
+        status: "new",
+        notes: row.notes || row.Notes || "",
+        optOut: false
+      };
+      db.customers.unshift(customer);
+      imported.push(customer);
+    }
+    writeDb(db);
+    return sendJson(res, 201, { imported: imported.length, customers: imported });
+  }
+
+  if (req.method === "GET" && pathname === "/api/dnc") {
+    return sendJson(res, 200, db.dnc || []);
+  }
+
+  if (req.method === "POST" && pathname === "/api/dnc") {
+    const body = await parseBody(req);
+    const phone = normalizePhone(body.phone);
+    if (!phone) return sendJson(res, 400, { error: "Phone required" });
+    if ((db.dnc || []).some((item) => normalizePhone(item.phone) === phone)) {
+      return sendJson(res, 200, { ok: true, dnc: db.dnc });
+    }
+    db.dnc = db.dnc || [];
+    db.dnc.unshift({
+      id: makeId("dnc"),
+      phone,
+      reason: body.reason || "manual",
+      createdAt: new Date().toISOString()
+    });
+    const customer = db.customers.find((item) => normalizePhone(item.phone) === phone);
+    if (customer) {
+      customer.optOut = true;
+      customer.status = "opt_out";
+    }
+    writeDb(db);
+    return sendJson(res, 201, { ok: true, dnc: db.dnc });
+  }
+
+  if (req.method === "DELETE" && pathname.startsWith("/api/dnc/")) {
+    const id = pathname.split("/")[3];
+    db.dnc = (db.dnc || []).filter((item) => item.id !== id);
+    writeDb(db);
+    return sendJson(res, 200, { ok: true, dnc: db.dnc });
+  }
+
+  if (req.method === "GET" && pathname === "/api/settings") {
+    return sendJson(res, 200, db.settings);
+  }
+
+  if (req.method === "PUT" && pathname === "/api/settings") {
+    const body = await parseBody(req);
+    db.settings = { ...db.settings, ...body };
+    writeDb(db);
+    return sendJson(res, 200, db.settings);
+  }
+
+  if (req.method === "POST" && pathname === "/api/password/change") {
+    const body = await parseBody(req);
+    const account = db.users.find((item) => item.id === user.id);
+    if (!account) return sendJson(res, 404, { error: "User not found" });
+    if (!verifyPassword(body.currentPassword, account.password)) {
+      return sendJson(res, 400, { error: "Current password is incorrect" });
+    }
+    if (!body.newPassword || String(body.newPassword).length < 6) {
+      return sendJson(res, 400, { error: "New password must be at least 6 characters" });
+    }
+    account.password = hashPassword(body.newPassword);
+    writeDb(db);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (req.method === "POST" && pathname.startsWith("/api/calls/") && pathname.endsWith("/disposition")) {
+    const id = pathname.split("/")[3];
+    const body = await parseBody(req);
+    const call = db.calls.find((item) => item.id === id);
+    if (!call) return sendJson(res, 404, { error: "Call not found" });
+    if (body.disposition && !DISPOSITIONS.includes(body.disposition)) {
+      return sendJson(res, 400, { error: `Invalid disposition. Use: ${DISPOSITIONS.join(", ")}` });
+    }
+    call.disposition = body.disposition || null;
+    call.notes = body.notes || call.notes || "";
+    if (body.disposition === "opt_out") {
+      const customer = db.customers.find((item) => item.id === call.customerId);
+      if (customer) {
+        customer.optOut = true;
+        customer.status = "opt_out";
+      }
+      if (!isDncBlocked(db, call.phone)) {
+        db.dnc = db.dnc || [];
+        db.dnc.unshift({
+          id: makeId("dnc"),
+          phone: normalizePhone(call.phone),
+          reason: "call_disposition_opt_out",
+          createdAt: new Date().toISOString()
+        });
+      }
+    }
+    writeDb(db);
+    return sendJson(res, 200, call);
+  }
+
+  if (req.method === "GET" && pathname === "/api/agents/board") {
+    return sendJson(res, 200, {
+      employees: db.employees.map((employee) => ({
+        id: employee.id,
+        name: employee.name,
+        department: employee.department,
+        phone: employee.phone,
+        availability: employee.availability,
+        online: employee.online !== false
+      })),
+      free: db.employees.filter((employee) => employee.online !== false && employee.availability === "free").length,
+      busy: db.employees.filter((employee) => employee.availability === "busy").length
+    });
+  }
+
+  if (req.method === "GET" && pathname === "/api/dispositions") {
+    return sendJson(res, 200, { dispositions: DISPOSITIONS });
   }
 
   if (req.method === "POST" && pathname === "/api/simulate/incoming") {

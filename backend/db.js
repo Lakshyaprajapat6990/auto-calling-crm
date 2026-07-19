@@ -74,7 +74,9 @@ function replaceDb(db) {
     campaigns: Array.isArray(db.campaigns) ? db.campaigns : [],
     calls: Array.isArray(db.calls) ? db.calls : [],
     callbacks: Array.isArray(db.callbacks) ? db.callbacks : [],
-    recordings: Array.isArray(db.recordings) ? db.recordings : []
+    recordings: Array.isArray(db.recordings) ? db.recordings : [],
+    dnc: Array.isArray(db.dnc) ? db.dnc : [],
+    settings: db.settings && typeof db.settings === "object" ? db.settings : {}
   };
   writeDb(next);
   return readDb();
